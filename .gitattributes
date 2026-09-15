@@ -1,0 +1,22 @@
+# Store text files with LF line endings, so Windows machines and the Linux CI
+# see exactly the same files.
+* text=auto eol=lf
+
+# Windows-only scripts need CRLF
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.pdf binary
+*.docx binary
+*.woff2 binary
+
+# Generated files: GitHub collapses these in pull request diffs
+pnpm-lock.yaml linguist-generated=true
+packages/contracts/src/generated/** linguist-generated=true
+apps/web/public/mockServiceWorker.js linguist-generated=true
