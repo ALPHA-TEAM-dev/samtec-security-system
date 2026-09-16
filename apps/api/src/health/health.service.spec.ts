@@ -1,17 +1,6 @@
-import { describe, expect, it } from 'vitest';
-import { AppConfig } from '../config/app-config.js';
+import { describe, expect, it, vi } from 'vitest';
 import type { PrismaService } from '../database/prisma.service.js';
 import { HealthService } from './health.service.js';
-
-const config = new AppConfig(
-  {
-    NODE_ENV: 'test',
-    PORT: 3000,
-    DATABASE_URL: 'postgresql://samtec@localhost:5432/samtec_test',
-    CORS_ORIGINS: ['http://localhost:5173'],
-  },
-  '0.1.0',
-);
 
 /**
  * A pretend database for unit tests. Because HealthService receives its
@@ -19,26 +8,44 @@ const config = new AppConfig(
  * of a real database connection. The cast is safe: HealthService only calls
  * `isReachable`.
  */
-function fakeDatabase(reachable: boolean): PrismaService {
-  return { isReachable: async () => reachable } as unknown as PrismaService;
+function fakeDatabase(reachable: boolean) {
+  const isReachable = vi.fn(async () => reachable);
+  return { database: { isReachable } as unknown as PrismaService, isReachable };
 }
 
 describe('HealthService', () => {
   it('reports ok when the database answers', async () => {
-    const report = await new HealthService(fakeDatabase(true), config).check();
+    const { database } = fakeDatabase(true);
 
-    expect(report).toMatchObject({
-      status: 'ok',
-      version: '0.1.0',
-      environment: 'test',
-      checks: { database: 'up' },
-    });
+    const report = await new HealthService(database).check();
+
+    expect(report).toMatchObject({ status: 'ok', checks: { database: 'up' } });
   });
 
   it('reports degraded when the database is down', async () => {
-    const report = await new HealthService(fakeDatabase(false), config).check();
+    const { database } = fakeDatabase(false);
+
+    const report = await new HealthService(database).check();
 
     expect(report.status).toBe('degraded');
     expect(report.checks.database).toBe('down');
+  });
+
+  it('reuses a recent database check instead of querying on every call', async () => {
+    const { database, isReachable } = fakeDatabase(true);
+    const health = new HealthService(database);
+
+    await health.check();
+    await health.check();
+
+    expect(isReachable).toHaveBeenCalledTimes(1);
+  });
+
+  it('shares only what a public endpoint needs', async () => {
+    const { database } = fakeDatabase(true);
+
+    const report = await new HealthService(database).check();
+
+    expect(Object.keys(report).sort()).toEqual(['checks', 'status', 'time']);
   });
 });

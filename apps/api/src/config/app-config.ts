@@ -12,20 +12,17 @@ export class AppConfig {
   readonly port: number;
   readonly databaseUrl: string;
   readonly corsOrigins: readonly string[];
-  /** The version from package.json. pnpm sets `npm_package_version` when it runs a script. */
-  readonly version: string;
 
-  constructor(env: Env, version = 'dev') {
+  constructor(env: Env) {
     this.nodeEnv = env.NODE_ENV;
     this.port = env.PORT;
     this.databaseUrl = env.DATABASE_URL;
     this.corsOrigins = env.CORS_ORIGINS;
-    this.version = version;
   }
 
   /** Reads and checks `process.env`. Throws a readable error when something is wrong. */
   static fromProcessEnv(): AppConfig {
-    return new AppConfig(parseEnv(process.env), process.env.npm_package_version);
+    return new AppConfig(parseEnv(process.env));
   }
 
   get isProduction(): boolean {

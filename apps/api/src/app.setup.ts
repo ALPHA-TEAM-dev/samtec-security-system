@@ -25,7 +25,16 @@ export function configureApp(app: NestExpressApplication, config: AppConfig): vo
   // hides which framework the API runs on.
   app.use(helmet());
   // Only the dashboard's own address may call the API from a browser.
-  app.enableCors({ origin: [...config.corsOrigins], credentials: true });
+  // `exposedHeaders` lists the response headers the dashboard may read.
+  app.enableCors({
+    origin: [...config.corsOrigins],
+    credentials: true,
+    exposedHeaders: ['Location', 'Retry-After', 'X-Request-ID'],
+  });
+  // Read JSON bodies up to 100 kB. A bigger body is refused with 413 before
+  // any of our code runs. Endpoints that need more (such as device punch
+  // batches in Phase 2) must say so in the contract and be reviewed.
+  app.useBodyParser('json', { limit: '100kb' });
   // Validates any request body, query or route parameter that declares a Zod `schema`.
   // The custom exceptionFactory keeps each problem's field path, so the error
   // response can tell the dashboard exactly which field is wrong.

@@ -17,9 +17,15 @@ import { getRequestId } from './request-id.middleware.js';
  *
  * - Expected errors (Nest `HttpException`s such as `NotFoundException`) keep
  *   their status code and message.
- * - Unexpected errors become a generic 500. The real error is logged with the
- *   request's traceId but never sent to the client, because stack traces and
- *   internal messages help attackers.
+ * - Errors raised while reading the request, such as a body that is too large,
+ *   keep their 4xx status with a generic message.
+ * - Unexpected errors become a generic 500. Stack traces and internal messages
+ *   are never sent to the client, because they help attackers.
+ *
+ * Logging rules: never log request bodies, query strings or error messages,
+ * because they can contain personal data such as Ghana Card numbers.
+ * - 4xx: one warning line with the method, path, status and traceId.
+ * - 5xx: the same, plus the error's name, its code and its stack frames.
  */
 @Catch()
 export class ProblemDetailsFilter implements ExceptionFilter {
@@ -29,15 +35,22 @@ export class ProblemDetailsFilter implements ExceptionFilter {
     const http = host.switchToHttp();
     const request = http.getRequest<Request>();
     const response = http.getResponse<Response>();
-    // `originalUrl` keeps the full path (including /api/v1), even inside Nest's
-    // not-found handler. The query string is dropped, so search terms never
-    // appear in error responses or logs.
+
+    // The path without its query string, so search terms never appear in
+    // error responses or logs.
     const path = request.originalUrl.split('?')[0] ?? request.path;
     const problem = toProblemDetails(exception, path, getRequestId(response));
 
+    // Nest's "route not found" message repeats the full URL, query string included.
+    if (problem.detail !== undefined) {
+      problem.detail = problem.detail.replaceAll(request.originalUrl, path);
+    }
+
+    const summary = `${request.method} ${path} answered ${problem.status} (traceId ${problem.traceId})`;
     if (problem.status >= HttpStatus.INTERNAL_SERVER_ERROR) {
-      const stack = exception instanceof Error ? exception.stack : String(exception);
-      this.logger.error(`${request.method} ${path} failed (traceId ${problem.traceId})`, stack);
+      this.logger.error(`${summary}: ${describeForLogs(exception)}`);
+    } else {
+      this.logger.warn(summary);
     }
 
     response.status(problem.status).type('application/problem+json').json(problem);
@@ -50,17 +63,62 @@ export function toProblemDetails(
   instance: string,
   traceId: string,
 ): ProblemDetails {
-  if (!(exception instanceof HttpException)) {
+  if (exception instanceof HttpException) {
+    return fromHttpException(exception, instance, traceId);
+  }
+
+  const clientStatus = clientErrorStatus(exception);
+  if (clientStatus !== undefined) {
     return {
       type: 'about:blank',
-      title: titleFor(HttpStatus.INTERNAL_SERVER_ERROR),
-      status: HttpStatus.INTERNAL_SERVER_ERROR,
-      detail: 'Something went wrong on our side. Please share the traceId with the SAMTEC team.',
+      title: titleFor(clientStatus),
+      status: clientStatus,
+      detail: CLIENT_ERROR_DETAILS[clientStatus] ?? 'The request could not be read.',
       instance,
       traceId,
     };
   }
 
+  return {
+    type: 'about:blank',
+    title: titleFor(HttpStatus.INTERNAL_SERVER_ERROR),
+    status: HttpStatus.INTERNAL_SERVER_ERROR,
+    detail: 'Something went wrong on our side. Please share the traceId with the SAMTEC team.',
+    instance,
+    traceId,
+  };
+}
+
+/**
+ * Describes an error for the logs: its name, its code (for example Prisma's
+ * `P2002`) and its stack frames. Never its message, which can contain personal data.
+ */
+export function describeForLogs(exception: unknown): string {
+  if (!(exception instanceof Error)) {
+    return 'a value that is not an Error was thrown';
+  }
+  const code =
+    'code' in exception &&
+    (typeof exception.code === 'string' || typeof exception.code === 'number')
+      ? ` (code ${exception.code})`
+      : '';
+  const frames = (exception.stack ?? '')
+    .split('\n')
+    .filter((line) => line.trimStart().startsWith('at '))
+    .join('\n');
+  return `${exception.name}${code}\n${frames}`;
+}
+
+const CLIENT_ERROR_DETAILS: Record<number, string> = {
+  413: 'The request body is too large.',
+  415: 'The request body uses a format or character set the API does not accept.',
+};
+
+function fromHttpException(
+  exception: HttpException,
+  instance: string,
+  traceId: string,
+): ProblemDetails {
   const status = exception.getStatus();
   const { detail, errors } = describeHttpException(exception);
 
@@ -76,7 +134,30 @@ export function toProblemDetails(
     };
   }
 
+  if (status === HttpStatus.CONFLICT) {
+    return {
+      type: 'urn:samtec:problem:conflict',
+      title: 'Conflict',
+      status,
+      detail,
+      instance,
+      traceId,
+    };
+  }
+
   return { type: 'about:blank', title: titleFor(status), status, detail, instance, traceId };
+}
+
+/**
+ * Errors thrown before our code runs, such as body-parser's "request entity
+ * too large", carry their own 4xx `status`. Returns it, or undefined.
+ */
+function clientErrorStatus(exception: unknown): number | undefined {
+  if (typeof exception !== 'object' || exception === null || !('status' in exception)) {
+    return undefined;
+  }
+  const { status } = exception;
+  return typeof status === 'number' && status >= 400 && status < 500 ? status : undefined;
 }
 
 function titleFor(status: number): string {

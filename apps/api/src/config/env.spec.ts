@@ -21,6 +21,33 @@ describe('parseEnv', () => {
     expect(env.CORS_ORIGINS).toEqual(['http://localhost:5173', 'https://dashboard.samtec.example']);
   });
 
+  it.each([
+    'http://localhost:5173/',
+    'https://dashboard.samtec.example/app',
+    'dashboard.samtec.example',
+    'ftp://dashboard.samtec.example',
+  ])('rejects %s as a CORS origin, because browsers never send that form', (origin) => {
+    expect(() => parseEnv({ ...minimalEnv, CORS_ORIGINS: origin })).toThrow(/CORS origin/);
+  });
+
+  it('requires https CORS origins in production', () => {
+    expect(() =>
+      parseEnv({
+        ...minimalEnv,
+        NODE_ENV: 'production',
+        CORS_ORIGINS: 'http://dashboard.samtec.example',
+      }),
+    ).toThrow(/https/);
+
+    expect(
+      parseEnv({
+        ...minimalEnv,
+        NODE_ENV: 'production',
+        CORS_ORIGINS: 'https://dashboard.samtec.example',
+      }).CORS_ORIGINS,
+    ).toEqual(['https://dashboard.samtec.example']);
+  });
+
   it('refuses to start without a database URL', () => {
     expect(() => parseEnv({})).toThrow(/DATABASE_URL/);
   });
