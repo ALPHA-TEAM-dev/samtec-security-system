@@ -22,6 +22,8 @@ export function formatCedis(amountPesewas: number): string {
   return `${sign}GH₵ ${wholeCedis.format(cedis)}.${String(pesewas).padStart(2, '0')}`;
 }
 
+const CALENDAR_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
 const calendarDate = new Intl.DateTimeFormat('en-GB', {
   timeZone: 'UTC',
   day: 'numeric',
@@ -33,8 +35,15 @@ const calendarDate = new Intl.DateTimeFormat('en-GB', {
  * Formats a calendar date from the API ("2026-09-15") as "15 Sept 2026".
  * A calendar date has no time zone, so it is read and shown in UTC and can
  * never shift by a day on a computer set to another time zone.
+ *
+ * For a timestamp such as "2026-09-15T08:30:00Z", use `formatDateTime` instead.
  */
 export function formatDate(isoDate: string): string {
+  if (!CALENDAR_DATE.test(isoDate)) {
+    throw new TypeError(
+      `formatDate expects a calendar date like "2026-09-15", but got "${isoDate}". Use formatDateTime for timestamps.`,
+    );
+  }
   return calendarDate.format(new Date(`${isoDate}T00:00:00Z`));
 }
 
@@ -55,15 +64,4 @@ const ghanaDateTime = new Intl.DateTimeFormat('en-GB', {
  */
 export function formatDateTime(isoTimestamp: string): string {
   return ghanaDateTime.format(new Date(isoTimestamp));
-}
-
-/** Formats a number of seconds as a short duration: "3d 4h", "2h 5m", "7m" or "45s". */
-export function formatDuration(totalSeconds: number): string {
-  const days = Math.floor(totalSeconds / 86_400);
-  const hours = Math.floor((totalSeconds % 86_400) / 3_600);
-  const minutes = Math.floor((totalSeconds % 3_600) / 60);
-  if (days > 0) return `${days}d ${hours}h`;
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  if (minutes > 0) return `${minutes}m`;
-  return `${totalSeconds}s`;
 }

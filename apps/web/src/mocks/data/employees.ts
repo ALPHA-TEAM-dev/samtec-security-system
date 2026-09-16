@@ -115,10 +115,18 @@ const people: MockPerson[] = [
   },
 ];
 
-/** Full employee records, shaped exactly like the contract's `Employee` schema. */
+const DAY_IN_MILLISECONDS = 86_400_000;
+
+/**
+ * Full employee records, shaped exactly like the contract's `Employee` schema.
+ * The mock API answers as an HR user would see them, so the Ghana Card number
+ * is included.
+ */
 export const mockEmployees: Employee[] = people.map((person, index) => {
   const number = index + 1;
   const site = mockSites.find((candidate) => candidate.code === person.siteCode);
+  // Everyone except new starters enrolled their biometrics the day after being hired.
+  const enrolledAt = new Date(Date.parse(`${person.hireDate}T10:00:00Z`) + DAY_IN_MILLISECONDS);
   return {
     id: `01927c3e-5a4b-7c8d-9e0f-${String(number).padStart(12, '0')}`,
     staffNumber: `SMT-${String(number).padStart(5, '0')}`,
@@ -132,7 +140,7 @@ export const mockEmployees: Employee[] = people.map((person, index) => {
     ghanaCardNumber: `GHA-000000${String(number).padStart(3, '0')}-${number % 10}`,
     position: person.position,
     status: person.status,
-    biometricEnrolled: person.status !== 'PENDING_ENROLLMENT',
+    biometricEnrolledAt: person.status === 'PENDING_ENROLLMENT' ? null : enrolledAt.toISOString(),
     hireDate: person.hireDate,
     terminationDate: person.terminationDate ?? null,
     currentSite: site ? { id: site.id, code: site.code, name: site.name } : null,

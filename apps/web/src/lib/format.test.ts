@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { formatCedis, formatDate, formatDateTime, formatDuration } from './format';
+import { formatCedis, formatDate, formatDateTime } from './format';
+
+describe('the test environment', () => {
+  it('runs far from Ghana, so time zone mistakes cannot hide', () => {
+    // Honolulu is 10 hours behind UTC (see vitest.config.ts).
+    expect(new Date('2026-09-15T00:00:00Z').getTimezoneOffset()).toBe(600);
+  });
+});
 
 describe('formatCedis', () => {
   it('shows pesewas as cedis with two decimals', () => {
@@ -24,19 +31,14 @@ describe('formatDate', () => {
   it('shows the same calendar date the API sent', () => {
     expect(formatDate('2026-09-15')).toMatch(/^15 Sept? 2026$/);
   });
+
+  it('refuses a timestamp, which needs formatDateTime', () => {
+    expect(() => formatDate('2026-09-15T08:30:00Z')).toThrow(TypeError);
+  });
 });
 
 describe('formatDateTime', () => {
   it('shows timestamps in Ghana time', () => {
     expect(formatDateTime('2026-09-15T08:30:00Z')).toMatch(/^15 Sept? 2026, 08:30$/);
-  });
-});
-
-describe('formatDuration', () => {
-  it('picks the two largest useful units', () => {
-    expect(formatDuration(45)).toBe('45s');
-    expect(formatDuration(420)).toBe('7m');
-    expect(formatDuration(7_500)).toBe('2h 5m');
-    expect(formatDuration(273_600)).toBe('3d 4h');
   });
 });

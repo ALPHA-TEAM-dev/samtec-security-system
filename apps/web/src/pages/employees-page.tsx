@@ -1,4 +1,5 @@
 import type { EmployeeList, EmployeeStatus } from '@samtec/contracts';
+import { cn } from 'cn';
 import { ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import {
@@ -27,6 +28,9 @@ import { describeApiError } from '@/lib/problem';
 
 const PAGE_SIZE = 10;
 const COLUMN_COUNT = 7;
+// The contract's limits for the `search` parameter.
+const SEARCH_MIN_LENGTH = 2;
+const SEARCH_MAX_LENGTH = 100;
 const LOADING_ROW_KEYS = ['loading-1', 'loading-2', 'loading-3', 'loading-4', 'loading-5'];
 
 /**
@@ -37,6 +41,7 @@ const LOADING_ROW_KEYS = ['loading-1', 'loading-2', 'loading-3', 'loading-4', 'l
  */
 export function EmployeesPage() {
   const [searchInput, setSearchInput] = useState('');
+  const [searchTooShort, setSearchTooShort] = useState(false);
   const [search, setSearch] = useState<string>();
   const [status, setStatus] = useState<EmployeeStatus>();
   // The cursor of every page visited so far. The last one is the current page.
@@ -50,11 +55,20 @@ export function EmployeesPage() {
     { placeholderData: (previous) => previous },
   );
 
+  // True while the table still shows the previous page and the new one is loading.
+  const showingOldPage = employees.isPlaceholderData;
+  const nextCursor = employees.data?.nextCursor ?? null;
+
   function applySearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const text = searchInput.trim();
-    // The API only accepts searches of at least 2 characters.
-    setSearch(text.length >= 2 ? text : undefined);
+    // An empty box shows everyone. One character is too short for the API.
+    if (text.length > 0 && text.length < SEARCH_MIN_LENGTH) {
+      setSearchTooShort(true);
+      return;
+    }
+    setSearchTooShort(false);
+    setSearch(text.length > 0 ? text : undefined);
     setCursors([undefined]);
   }
 
@@ -63,7 +77,17 @@ export function EmployeesPage() {
     setCursors([undefined]);
   }
 
-  const nextCursor = employees.data?.nextCursor ?? null;
+  function goToPreviousPage() {
+    setCursors((current) => (current.length > 1 ? current.slice(0, -1) : current));
+  }
+
+  function goToNextPage() {
+    // Ignore clicks while a page is loading, so one click never skips a page.
+    // The button stays enabled, so keyboard users never lose their place.
+    if (nextCursor !== null && !showingOldPage) {
+      setCursors((current) => [...current, nextCursor]);
+    }
+  }
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6">
@@ -72,22 +96,31 @@ export function EmployeesPage() {
         <p className="text-muted-foreground text-sm">Guards and staff on the company payroll.</p>
       </header>
 
-      <div className="flex flex-wrap items-end gap-4">
-        <form onSubmit={applySearch} className="flex items-end gap-2">
-          <div className="grid gap-1.5">
-            <Label htmlFor="employee-search">Search employees</Label>
+      <div className="flex flex-wrap items-start gap-4">
+        <form onSubmit={applySearch} className="grid gap-1.5">
+          <Label htmlFor="employee-search">Search employees</Label>
+          <div className="flex gap-2">
             <Input
               id="employee-search"
               value={searchInput}
               onChange={(event) => setSearchInput(event.target.value)}
               placeholder="Name or staff number"
+              maxLength={SEARCH_MAX_LENGTH}
+              aria-describedby="employee-search-hint"
+              aria-invalid={searchTooShort}
               className="w-64"
             />
+            <Button type="submit" variant="secondary">
+              <Search aria-hidden="true" />
+              Search
+            </Button>
           </div>
-          <Button type="submit" variant="secondary">
-            <Search aria-hidden="true" />
-            Search
-          </Button>
+          <p
+            id="employee-search-hint"
+            className={cn('text-xs', searchTooShort ? 'text-destructive' : 'text-muted-foreground')}
+          >
+            Type at least {SEARCH_MIN_LENGTH} characters.
+          </p>
         </form>
 
         <div className="grid gap-1.5">
@@ -111,7 +144,10 @@ export function EmployeesPage() {
       {employees.error ? (
         <LoadError error={employees.error} onRetry={() => void employees.refetch()} />
       ) : (
-        <Card className="overflow-hidden py-0">
+        <Card
+          aria-busy={showingOldPage}
+          className={cn('overflow-hidden py-0 transition-opacity', showingOldPage && 'opacity-60')}
+        >
           <Table>
             <TableHeader>
               <TableRow>
@@ -135,22 +171,13 @@ export function EmployeesPage() {
         <Button
           variant="outline"
           size="sm"
-          disabled={cursors.length === 1 || employees.isFetching}
-          onClick={() => setCursors((current) => current.slice(0, -1))}
+          disabled={cursors.length === 1}
+          onClick={goToPreviousPage}
         >
           <ChevronLeft aria-hidden="true" />
           Previous
         </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={nextCursor === null || employees.isFetching}
-          onClick={() => {
-            if (nextCursor !== null) {
-              setCursors((current) => [...current, nextCursor]);
-            }
-          }}
-        >
+        <Button variant="outline" size="sm" disabled={nextCursor === null} onClick={goToNextPage}>
           Next
           <ChevronRight aria-hidden="true" />
         </Button>
@@ -161,10 +188,11 @@ export function EmployeesPage() {
 
 function EmployeeRows({ loading, page }: { loading: boolean; page: EmployeeList | undefined }) {
   if (loading) {
-    return LOADING_ROW_KEYS.map((key) => (
+    return LOADING_ROW_KEYS.map((key, index) => (
       <TableRow key={key}>
         <TableCell colSpan={COLUMN_COUNT} className="px-4">
-          <Skeleton className="h-5 w-full" />
+          {index === 0 && <span className="sr-only">Loading employees…</span>}
+          <Skeleton aria-hidden="true" className="h-5 w-full" />
         </TableCell>
       </TableRow>
     ));
@@ -196,7 +224,7 @@ function EmployeeRows({ loading, page }: { loading: boolean; page: EmployeeList 
         <EmployeeStatusBadge status={employee.status} />
       </TableCell>
       <TableCell>
-        {employee.biometricEnrolled ? (
+        {employee.biometricEnrolledAt ? (
           'Enrolled'
         ) : (
           <span className="text-muted-foreground">Not enrolled</span>

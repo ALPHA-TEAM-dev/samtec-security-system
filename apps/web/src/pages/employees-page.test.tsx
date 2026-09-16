@@ -15,6 +15,31 @@ describe('EmployeesPage', () => {
     expect(screen.getByText('SMT-00001')).toBeInTheDocument();
   });
 
+  it('moves to the next page and back', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<EmployeesPage />);
+    await screen.findByText('SMT-00001');
+
+    await user.click(screen.getByRole('button', { name: 'Next' }));
+    expect(await screen.findByText('SMT-00011')).toBeInTheDocument();
+    expect(screen.queryByText('SMT-00001')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Previous' }));
+    expect(await screen.findByText('SMT-00001')).toBeInTheDocument();
+    expect(screen.queryByText('SMT-00011')).not.toBeInTheDocument();
+  });
+
+  it('filters by status', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<EmployeesPage />);
+    await screen.findByText('Kwame Kofi Mensah');
+
+    await user.selectOptions(screen.getByLabelText('Status'), 'SUSPENDED');
+
+    expect(await screen.findByText('Grace Adjei')).toBeInTheDocument();
+    expect(screen.queryByText('Kwame Kofi Mensah')).not.toBeInTheDocument();
+  });
+
   it('shows a message when no employee matches the search', async () => {
     const user = userEvent.setup();
     renderWithProviders(<EmployeesPage />);
@@ -24,6 +49,18 @@ describe('EmployeesPage', () => {
     await user.click(screen.getByRole('button', { name: 'Search' }));
 
     expect(await screen.findByText('No employees match these filters.')).toBeInTheDocument();
+  });
+
+  it('asks for a longer search instead of sending one character', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<EmployeesPage />);
+    await screen.findByText('Kwame Kofi Mensah');
+
+    await user.type(screen.getByLabelText('Search employees'), 'K');
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+
+    expect(screen.getByLabelText('Search employees')).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByText('Kwame Kofi Mensah')).toBeInTheDocument();
   });
 
   it('explains the problem when the API fails', async () => {

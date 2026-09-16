@@ -8,7 +8,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Skeleton } from '@/components/ui/skeleton';
 import { $api } from '@/lib/api';
 import { env } from '@/lib/env';
-import { formatDateTime, formatDuration } from '@/lib/format';
+import { formatDateTime } from '@/lib/format';
+import { describeApiError, isProblemDetails } from '@/lib/problem';
 
 /** A 503 answer still carries a health report, so a report can arrive as data or as the error. */
 function isHealthReport(value: unknown): value is HealthResponse {
@@ -21,12 +22,23 @@ function isHealthReport(value: unknown): value is HealthResponse {
  * loading data from the API.
  */
 export function SystemStatusPage() {
-  const health = $api.useQuery('get', '/health');
+  // No automatic retry here: a failed check should show straight away.
+  const health = $api.useQuery('get', '/health', {}, { retry: false });
 
-  const candidate: unknown = health.data ?? health.error;
-  const report = isHealthReport(candidate) ? candidate : undefined;
-  const apiReachable = report !== undefined;
-  const databaseUp = report?.checks.database === 'up';
+  // Look only at the latest check. When a new check fails, React Query keeps
+  // the older successful report in `data`, and it must not be shown as current.
+  const latest: unknown = health.isError ? health.error : health.data;
+  const report = isHealthReport(latest) ? latest : undefined;
+  const apiAnsweredWithError = report === undefined && isProblemDetails(latest);
+  const apiUnreachable = health.isError && report === undefined && !apiAnsweredWithError;
+
+  function checkAgain() {
+    // Ignore extra clicks while a check is running. The button stays enabled,
+    // so keyboard users never lose their place.
+    if (!health.isFetching) {
+      void health.refetch();
+    }
+  }
 
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-6">
@@ -38,45 +50,60 @@ export function SystemStatusPage() {
             database.
           </p>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => void health.refetch()}
-          disabled={health.isFetching}
-        >
+        <Button variant="outline" size="sm" onClick={checkAgain}>
           <RefreshCw aria-hidden="true" className={cn(health.isFetching && 'animate-spin')} />
           Check again
         </Button>
       </header>
 
+      <p role="status" className="sr-only">
+        {health.isFetching ? 'Checking the API…' : ''}
+      </p>
+
       <div className="grid gap-4 sm:grid-cols-2">
         <StatusCard
           title="API"
-          description={env.useMocks ? 'Mock API running in this browser' : env.apiBaseUrl}
+          description={env.useMocks ? 'Mock API running in this browser' : 'SAMTEC REST API'}
           loading={health.isPending}
-          ok={apiReachable}
+          ok={report !== undefined}
           okLabel="Reachable"
-          failLabel="Not reachable"
+          failLabel={apiAnsweredWithError ? 'Answered with an error' : 'Not reachable'}
         />
         <StatusCard
           title="Database"
-          description="PostgreSQL"
+          description={env.useMocks ? 'Simulated by the mock API' : 'PostgreSQL'}
           loading={health.isPending}
-          ok={databaseUp}
-          okLabel="Connected"
-          failLabel={apiReachable ? 'Down' : 'Unknown'}
+          ok={report?.checks.database === 'up'}
+          okLabel={env.useMocks ? 'Simulated' : 'Connected'}
+          failLabel={report ? 'Down' : 'Unknown'}
         />
       </div>
 
-      {!health.isPending && !apiReachable && (
+      {apiUnreachable && (
         <Alert variant="destructive">
           <AlertTitle>The dashboard cannot reach the API</AlertTitle>
           <AlertDescription>
-            Start the API with pnpm dev:api, or run the dashboard with pretend data using pnpm
-            dev:web.
+            <p>Check these, then press Check again:</p>
+            <ul className="list-disc space-y-1 pl-5">
+              <li>
+                The API is running (<code>pnpm dev:api</code>).
+              </li>
+              <li>
+                The dashboard calls the right address: <code>{env.apiBaseUrl}</code>
+              </li>
+              <li>
+                The API's <code>CORS_ORIGINS</code> setting includes this dashboard's address,{' '}
+                <code>{window.location.origin}</code>.
+              </li>
+            </ul>
+            <p>
+              To work with pretend data instead, run <code>pnpm dev:web</code>.
+            </p>
           </AlertDescription>
         </Alert>
       )}
+
+      {apiAnsweredWithError && <ApiErrorAlert error={latest} />}
 
       {report && (
         <Card>
@@ -84,11 +111,11 @@ export function SystemStatusPage() {
             <CardTitle>Details</CardTitle>
           </CardHeader>
           <CardContent>
-            <dl className="grid grid-cols-[max-content_1fr] gap-x-8 gap-y-2 text-sm tabular-nums">
-              <DetailRow term="Version">{report.version}</DetailRow>
-              <DetailRow term="Environment">{report.environment}</DetailRow>
-              <DetailRow term="Uptime">{formatDuration(report.uptimeSeconds)}</DetailRow>
-              <DetailRow term="Server time (Ghana)">{formatDateTime(report.time)}</DetailRow>
+            <dl className="grid grid-cols-[max-content_1fr] gap-x-8 gap-y-2 text-sm">
+              <DetailRow term="API address">{env.apiBaseUrl}</DetailRow>
+              <DetailRow term="Server time (Ghana)">
+                <span className="tabular-nums">{formatDateTime(report.time)}</span>
+              </DetailRow>
             </dl>
           </CardContent>
         </Card>
@@ -133,11 +160,25 @@ function StatusCard({ title, description, loading, ok, okLabel, failLabel }: Sta
   );
 }
 
+/** The API answered, but with an error instead of a health report (for example a 500). */
+function ApiErrorAlert({ error }: { error: unknown }) {
+  const { message, traceId } = describeApiError(error);
+  return (
+    <Alert variant="destructive">
+      <AlertTitle>The API answered with an error</AlertTitle>
+      <AlertDescription>
+        <p>{message}</p>
+        {traceId && <p className="font-mono text-xs">Trace ID: {traceId}</p>}
+      </AlertDescription>
+    </Alert>
+  );
+}
+
 function DetailRow({ term, children }: { term: string; children: ReactNode }) {
   return (
     <>
       <dt className="text-muted-foreground">{term}</dt>
-      <dd>{children}</dd>
+      <dd className="min-w-0 break-words">{children}</dd>
     </>
   );
 }
