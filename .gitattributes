@@ -16,7 +16,10 @@
 *.docx binary
 *.woff2 binary
 
-# Generated files: GitHub collapses these in pull request diffs
-pnpm-lock.yaml linguist-generated=true
+# Generated types: GitHub collapses these in pull request diffs, because
+# `pnpm contracts:check` in CI proves they match openapi.yaml.
 packages/contracts/src/generated/** linguist-generated=true
-apps/web/public/mockServiceWorker.js linguist-generated=true
+
+# pnpm-lock.yaml and apps/web/public/mockServiceWorker.js are generated too, but
+# stay expanded on purpose: a reviewer must see which package versions and
+# which service worker code a pull request brings in.

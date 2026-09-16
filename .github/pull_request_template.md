@@ -28,7 +28,7 @@ Details: `docs/plan/06-security-and-review-gates.md`. In Claude Code, run `/lens
 - [ ] Types are strict (no `any`) and inputs are validated with Zod at the boundary.
 - [ ] Tests are added or updated. Money logic is tested to the pesewa.
 - [ ] Names state their units (`amountPesewas`, `clockedInAtUtc`).
-- [ ] A database migration is included and its SQL was read (only if the schema changed).
+- [ ] A database migration is included and its SQL was read (only if the schema changed). New tables enable row-level security.
 
 ### 3. Full-stack: does the seam hold?
 
@@ -40,7 +40,8 @@ Details: `docs/plan/06-security-and-review-gates.md`. In Claude Code, run `/lens
 ### 4. Security analyst: what would I attack?
 
 - [ ] Every new endpoint checks the user's role **and** whether they may see that specific record.
-- [ ] No secrets, tokens, Ghana Card numbers, real names or biometric data in code, tests or logs.
+- [ ] No secrets, tokens, Ghana Card numbers, real names or biometric data in code, tests or logs. Log lines hold IDs and the `traceId` only.
+- [ ] Responses include only the fields each role needs.
 - [ ] New dependencies are well known and `pnpm audit` is clean.
 
 ## Final check

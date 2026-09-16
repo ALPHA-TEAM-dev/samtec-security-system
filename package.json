@@ -23,6 +23,7 @@
     "contracts:docs": "pnpm --filter @samtec/contracts docs",
     "db:start": "pnpm --filter @samtec/api db:start",
     "db:migrate": "pnpm --filter @samtec/api db:migrate",
+    "db:deploy": "pnpm --filter @samtec/api db:deploy",
     "db:seed": "pnpm --filter @samtec/api db:seed",
     "db:reset": "pnpm --filter @samtec/api db:reset",
     "db:studio": "pnpm --filter @samtec/api db:studio",

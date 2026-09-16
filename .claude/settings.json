@@ -3,16 +3,27 @@
   "permissions": {
     "allow": [
       "Bash(pnpm check)",
-      "Bash(pnpm lint *)",
+      "Bash(pnpm lint)",
+      "Bash(pnpm lint:fix)",
       "Bash(pnpm typecheck)",
-      "Bash(pnpm test *)",
+      "Bash(pnpm test)",
       "Bash(pnpm build)",
       "Bash(pnpm contracts:check)",
       "Bash(pnpm contracts:generate)",
-      "Bash(git status *)",
-      "Bash(git diff *)",
-      "Bash(git log *)"
+      "Bash(git status --short)",
+      "Bash(git diff main...HEAD --stat)",
+      "Bash(git diff HEAD --stat)",
+      "Bash(git diff --cached --stat)"
     ],
-    "deny": ["Read(.env)", "Read(.env.local)", "Read(apps/api/.local-db/**)"]
+    "deny": [
+      "Read(**/.env)",
+      "Read(**/.env.local)",
+      "Read(**/.env.*.local)",
+      "Read(**/.env.development)",
+      "Read(**/.env.production)",
+      "Read(**/.env.test)",
+      "Read(**/.env.mock)",
+      "Read(apps/api/.local-db/**)"
+    ]
   }
 }

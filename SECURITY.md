@@ -8,7 +8,13 @@ feature of this product, not an afterthought.
 
 **Do not open a public issue.** This repository is public.
 
-Report privately to the maintainers:
+Report it privately through GitHub:
+[Report a vulnerability](https://github.com/ALPHA-TEAM-dev/samtec-security-system/security/advisories/new)
+(the **Security** tab, then **Report a vulnerability**). Only the maintainers
+can see the report.
+
+If that page is not available, ask a maintainer on GitHub for a private way to
+send the details, without describing the problem in public:
 
 - Francis (backend): GitHub [@AnnorFrancis](https://github.com/AnnorFrancis)
 - Samuel (frontend): GitHub [@ALPHA-TEAM-dev](https://github.com/ALPHA-TEAM-dev)
@@ -40,7 +46,14 @@ We aim to acknowledge reports within three days.
    package version in Phase 0 (see the decision log in
    `docs/plan/02-stack-decisions.md`).
 6. **Review through the security lens.** Every pull request completes the
-   security checklist in the pull request template.
+   security checklist in the pull request template. `.github/CODEOWNERS` asks
+   both developers to review sensitive files such as dependencies, CI and
+   database migrations.
+7. **Logs hold IDs, not people.** Never log request bodies, query strings,
+   names, phone numbers, Ghana Card numbers or tokens. Log the `traceId` and
+   record IDs instead.
+8. **Seed data stays local.** `pnpm db:seed` refuses any database that is not
+   on your own computer unless `ALLOW_REMOTE_SEED=yes` is set on purpose.
 
 ## Supported versions
 
