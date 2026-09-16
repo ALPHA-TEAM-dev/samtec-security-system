@@ -13,7 +13,7 @@ export interface paths {
         };
         /**
          * Check that the API and its database are working
-         * @description Public endpoint. The dashboard's System Status page calls it, and hosting platforms use it to decide whether the service is alive.
+         * @description Public endpoint. The dashboard's System Status page calls it, and hosting platforms use it to decide whether the service is alive. Anyone on the internet can call it, so it deliberately reveals nothing else, such as the API version or environment. The database check is reused for 5 seconds, so frequent calls stay cheap.
          */
         get: operations["getHealth"];
         put?: never;
@@ -40,10 +40,21 @@ export interface paths {
          *     `HttpOnly` cookie named `samtec_refresh`. JavaScript cannot read that
          *     cookie, which protects it from cross-site scripting.
          *
-         *     Accounts with the `ADMIN` or `HR_PAYROLL` role must also pass
-         *     two-factor authentication. For them the response has
-         *     `status: TWO_FACTOR_REQUIRED`, and the dashboard must call
-         *     `POST /auth/2fa/verify` next.
+         *     Accounts with the `ADMIN` or `HR_PAYROLL` role must use two-factor
+         *     authentication. The response `status` tells the dashboard what to do
+         *     next:
+         *
+         *     - `AUTHENTICATED`: signed in, with no second step.
+         *     - `TWO_FACTOR_REQUIRED`: call `POST /auth/2fa/verify` with the
+         *       `challengeToken` and a code from the user's authenticator app.
+         *     - `TWO_FACTOR_SETUP_REQUIRED`: the account has not set up two-factor
+         *       authentication yet. Call `POST /auth/2fa/setup`, show the QR code,
+         *       then call `POST /auth/2fa/enable` with the first code.
+         *
+         *     **Protection against password guessing:** repeated failures for the
+         *     same email are slowed down, then answered with `429` for 15 minutes.
+         *     This happens whether or not an account exists, so the answers never
+         *     reveal which emails have accounts.
          */
         post: operations["login"];
         delete?: never;
@@ -63,9 +74,67 @@ export interface paths {
         put?: never;
         /**
          * Finish signing in with a two-factor code
-         * @description Send the `challengeToken` from `POST /auth/login` and the 6-digit code from the user's authenticator app. On success the API responds like a normal sign-in and sets the refresh token cookie.
+         * @description Send the `challengeToken` from `POST /auth/login` and the 6-digit code
+         *     from the user's authenticator app. On success the API responds like a
+         *     normal sign-in and sets the refresh token cookie.
+         *
+         *     Rules the API enforces:
+         *
+         *     - A challenge token expires after 5 minutes, works only once, and
+         *       belongs to the one account that signed in.
+         *     - After 5 wrong codes the challenge is cancelled, and the user must
+         *       sign in with their password again.
+         *     - A code that was already accepted cannot be used a second time, even
+         *       within its 30-second window (replay protection).
          */
         post: operations["verifyTwoFactor"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/2fa/setup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start setting up two-factor authentication
+         * @description Send the `setupToken` from `POST /auth/login`. The API creates a new
+         *     secret for the account and returns it as an `otpauth://` link, which
+         *     the dashboard shows as a QR code for the authenticator app. Calling
+         *     this again replaces the secret, so only the newest QR code works.
+         *
+         *     The setup token expires after 10 minutes and belongs to one account.
+         *     Two-factor authentication stays off until `POST /auth/2fa/enable`
+         *     succeeds.
+         */
+        post: operations["startTwoFactorSetup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/2fa/enable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Finish setting up two-factor authentication
+         * @description Send the `setupToken` and the first 6-digit code from the authenticator app. A correct code proves the app was set up properly. The API then switches two-factor authentication on, uses up the setup token and signs the user in. The rules of `POST /auth/2fa/verify` apply here too: 5 wrong codes cancel the setup, and a code works only once.
+         */
+        post: operations["enableTwoFactor"];
         delete?: never;
         options?: never;
         head?: never;
@@ -83,7 +152,16 @@ export interface paths {
         put?: never;
         /**
          * Get a new access token using the refresh cookie
-         * @description The browser sends the `samtec_refresh` cookie automatically. The API replaces it with a new one (rotation), so a stolen refresh token stops working as soon as the real user refreshes.
+         * @description The browser sends the `samtec_refresh` cookie automatically. The API
+         *     replaces it with a new one on every call (rotation).
+         *
+         *     - **Reuse detection:** a refresh token that was already replaced must
+         *       never arrive again. If it does, someone may have copied it, so the
+         *       API signs that user out everywhere by revoking all of their refresh
+         *       tokens.
+         *     - **Origin check:** the request's `Origin` header must be one of the
+         *       dashboard addresses in the API's `CORS_ORIGINS` setting. Otherwise
+         *       the API answers `403`.
          */
         post: operations["refreshSession"];
         delete?: never;
@@ -101,7 +179,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Sign out and revoke the refresh token */
+        /**
+         * Sign out and revoke the refresh token
+         * @description Like `POST /auth/refresh`, the request's `Origin` header must be one of the dashboard addresses in `CORS_ORIGINS`, so another website cannot sign the user out.
+         */
         post: operations["logout"];
         delete?: never;
         options?: never;
@@ -162,7 +243,7 @@ export interface paths {
         };
         /**
          * Get one employee
-         * @description **Roles:** ADMIN, HR_PAYROLL, SUPERVISOR (own sites only), GUARD (own record only). Records the user may not see return `404`, not `403`, so nobody can discover which IDs exist.
+         * @description **Roles:** ADMIN, HR_PAYROLL, SUPERVISOR (own sites only), GUARD (own record only). Records the user may not see return `404`, not `403`, so nobody can discover which IDs exist. The Ghana Card number is only included for ADMIN, HR_PAYROLL and a guard viewing their own record.
          */
         get: operations["getEmployee"];
         put?: never;
@@ -247,22 +328,13 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /** @description The result of a health check. */
+        /** @description The result of a health check. Public, so it holds only what a health check needs. Version details will come from an admin-only endpoint in Phase 1. */
         HealthResponse: {
             /**
              * @description `ok` when everything works, `degraded` when a dependency is down.
              * @enum {string}
              */
             status: "ok" | "degraded";
-            /**
-             * @description The version of the API that is running.
-             * @example 0.1.0
-             */
-            version: string;
-            /** @enum {string} */
-            environment: "development" | "test" | "production";
-            /** @description Seconds since the API process started. */
-            uptimeSeconds: number;
             /**
              * Format: date-time
              * @description The server's current time in UTC.
@@ -331,8 +403,8 @@ export interface components {
             email: string;
             password: string;
         };
-        /** @description Either a finished sign-in or a request for a two-factor code. Check `status` to tell them apart. */
-        LoginResponse: components["schemas"]["AuthenticatedSession"] | components["schemas"]["TwoFactorChallenge"];
+        /** @description A finished sign-in, a request for a two-factor code, or a request to set up two-factor authentication. Check `status` to tell them apart. */
+        LoginResponse: components["schemas"]["AuthenticatedSession"] | components["schemas"]["TwoFactorChallenge"] | components["schemas"]["TwoFactorSetupRequired"];
         AuthenticatedSession: {
             /**
              * @description discriminator enum property added by openapi-typescript
@@ -351,18 +423,50 @@ export interface components {
              * @enum {string}
              */
             status: "TWO_FACTOR_REQUIRED";
-            /** @description Proves the password was correct. Send it to `POST /auth/2fa/verify` before it expires. */
-            challengeToken: string;
+            challengeToken: components["schemas"]["OneTimeToken"];
             /** @example 300 */
             expiresInSeconds: number;
         };
-        VerifyTwoFactorRequest: {
-            challengeToken: string;
+        TwoFactorSetupRequired: {
             /**
-             * @description The 6-digit code from the authenticator app.
-             * @example 492039
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
              */
-            code: string;
+            status: "TWO_FACTOR_SETUP_REQUIRED";
+            setupToken: components["schemas"]["OneTimeToken"];
+            /** @example 600 */
+            expiresInSeconds: number;
+        };
+        /** @description Proves the password was correct. It expires quickly, works for one account only, and is used up by the step it was issued for. Keep it in memory only. */
+        OneTimeToken: string;
+        /**
+         * @description The 6-digit code from the authenticator app.
+         * @example 492039
+         */
+        TwoFactorCode: string;
+        VerifyTwoFactorRequest: {
+            challengeToken: components["schemas"]["OneTimeToken"];
+            code: components["schemas"]["TwoFactorCode"];
+        };
+        TwoFactorSetupRequest: {
+            setupToken: components["schemas"]["OneTimeToken"];
+        };
+        /** @description The new two-factor secret. Both fields contain the secret itself, so show them only on the setup screen, and never store or log them. */
+        TwoFactorSetup: {
+            /**
+             * @description Show this link as a QR code for the authenticator app to scan.
+             * @example otpauth://totp/SAMTEC:ama.boateng%40samtec.example?secret=EXAMPLESECRET&issuer=SAMTEC
+             */
+            otpauthUri: string;
+            /**
+             * @description The same secret as text, for people who cannot scan the QR code.
+             * @example EXAMPLESECRET
+             */
+            manualEntryKey: string;
+        };
+        EnableTwoFactorRequest: {
+            setupToken: components["schemas"]["OneTimeToken"];
+            code: components["schemas"]["TwoFactorCode"];
         };
         AccessTokenResponse: {
             accessToken: string;
@@ -428,8 +532,7 @@ export interface components {
             /** @example Security Guard */
             position: string;
             status: components["schemas"]["EmployeeStatus"];
-            /** @description True once fingerprint or face templates are enrolled and have passed the duplicate check. */
-            biometricEnrolled: boolean;
+            biometricEnrolledAt: components["schemas"]["BiometricEnrolledAt"];
             /** @description The site the employee is posted to today, or `null` if unassigned. */
             currentSite: components["schemas"]["SiteSummary"] | null;
             /** Format: date */
@@ -440,6 +543,11 @@ export interface components {
             /** @description Pass this as `cursor` to get the next page. It is `null` on the last page. */
             nextCursor: string | null;
         };
+        /**
+         * Format: date-time
+         * @description When fingerprint or face templates were enrolled and passed the duplicate check, or `null` if the employee is not enrolled.
+         */
+        BiometricEnrolledAt: string | null;
         /** @description The full employee record. Contains sensitive identity data. */
         Employee: {
             /** Format: uuid */
@@ -454,12 +562,12 @@ export interface components {
             phone: components["schemas"]["GhanaPhoneNumber"];
             /** Format: email */
             email: string | null;
-            ghanaCardNumber: components["schemas"]["GhanaCardNumber"];
+            /** @description Only included for ADMIN and HR_PAYROLL, and for a guard viewing their own record. Missing for everyone else (data minimisation), so the dashboard must handle it being absent. */
+            ghanaCardNumber?: components["schemas"]["GhanaCardNumber"];
             /** @example Security Guard */
             position: string;
             status: components["schemas"]["EmployeeStatus"];
-            /** @description True once fingerprint or face templates are enrolled and have passed the duplicate check. */
-            biometricEnrolled: boolean;
+            biometricEnrolledAt: components["schemas"]["BiometricEnrolledAt"];
             /** Format: date */
             hireDate: string;
             /** Format: date */
@@ -642,7 +750,13 @@ export type LoginRequest = components['schemas']['LoginRequest'];
 export type LoginResponse = components['schemas']['LoginResponse'];
 export type AuthenticatedSession = components['schemas']['AuthenticatedSession'];
 export type TwoFactorChallenge = components['schemas']['TwoFactorChallenge'];
+export type TwoFactorSetupRequired = components['schemas']['TwoFactorSetupRequired'];
+export type OneTimeToken = components['schemas']['OneTimeToken'];
+export type TwoFactorCode = components['schemas']['TwoFactorCode'];
 export type VerifyTwoFactorRequest = components['schemas']['VerifyTwoFactorRequest'];
+export type TwoFactorSetupRequest = components['schemas']['TwoFactorSetupRequest'];
+export type TwoFactorSetup = components['schemas']['TwoFactorSetup'];
+export type EnableTwoFactorRequest = components['schemas']['EnableTwoFactorRequest'];
 export type AccessTokenResponse = components['schemas']['AccessTokenResponse'];
 export type EmployeeStatus = components['schemas']['EmployeeStatus'];
 export type TerminationReason = components['schemas']['TerminationReason'];
@@ -654,6 +768,7 @@ export type SiteCode = components['schemas']['SiteCode'];
 export type SiteSummary = components['schemas']['SiteSummary'];
 export type EmployeeListItem = components['schemas']['EmployeeListItem'];
 export type EmployeeList = components['schemas']['EmployeeList'];
+export type BiometricEnrolledAt = components['schemas']['BiometricEnrolledAt'];
 export type Employee = components['schemas']['Employee'];
 export type CreateEmployeeRequest = components['schemas']['CreateEmployeeRequest'];
 export type UpdateEmployeeRequest = components['schemas']['UpdateEmployeeRequest'];
@@ -762,6 +877,62 @@ export interface operations {
             429: components["responses"]["TooManyRequests"];
         };
     };
+    startTwoFactorSetup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TwoFactorSetupRequest"];
+            };
+        };
+        responses: {
+            /** @description The new secret, ready to show as a QR code. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TwoFactorSetup"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["InvalidCredentials"];
+            429: components["responses"]["TooManyRequests"];
+        };
+    };
+    enableTwoFactor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EnableTwoFactorRequest"];
+            };
+        };
+        responses: {
+            /** @description Two-factor authentication is on, and the user is signed in. */
+            200: {
+                headers: {
+                    /** @description The refresh token cookie. */
+                    "Set-Cookie"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthenticatedSession"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["InvalidCredentials"];
+            429: components["responses"]["TooManyRequests"];
+        };
+    };
     refreshSession: {
         parameters: {
             query?: never;
@@ -783,6 +954,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     logout: {
@@ -803,6 +975,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            403: components["responses"]["Forbidden"];
         };
     };
     getCurrentUser: {
@@ -911,6 +1084,7 @@ export interface operations {
                     "application/json": components["schemas"]["Employee"];
                 };
             };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
         };
@@ -1032,6 +1206,7 @@ export interface operations {
                     "application/json": components["schemas"]["Site"];
                 };
             };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
         };
