@@ -1,6 +1,6 @@
 # 07 · Roadmap: nine phases, each ending with a working demo
 
-The interactive 3D build map shows the same phases. This page is the authoritative checklist. The timing assumes part-time work alongside school. Adjust dates in the weekly check-in, never silently.
+This page is the authoritative checklist for every phase. The timing assumes part-time work alongside school. Adjust dates in the weekly check-in, never silently.
 
 ## Phase 0 · Foundation (week 1)
 
@@ -13,19 +13,25 @@ The interactive 3D build map shows the same phases. This page is the authoritati
 - [x] Prisma schema version 0 (companies, sites, employees, site assignments), first migration and seed data
 - [x] API contract version 0: health, auth, employees and sites
 - [x] Plan and beginner guides committed to `docs/`; four-lens reviewers in `.claude/`
-- [ ] Protect the `main` branch on GitHub (repository owner: see [Git and pull requests](../guides/06-git-and-pull-requests.md))
-- [ ] **Order or borrow a ZKTeco device now.** It is the item with the longest lead time in the project.
+- [x] Four-lens review of the Phase 0 pull request, with every finding fixed
 
 **Exit demo:** `pnpm dev` starts the API and the dashboard, and the System Status page shows the database as connected. CI is green on a real pull request.
+
+**Outside the repository.** These tasks need a person, not a pull request, and they do not block Phase 1:
+
+- [ ] Repository owner: protect `main`, require code owner review, and turn on private vulnerability reporting and Dependabot alerts ([Git and pull requests](../guides/06-git-and-pull-requests.md#protecting-the-main-branch-repository-owner-once))
+- [ ] **Order or borrow a ZKTeco device now.** It is the item with the longest lead time in the project.
 
 ## Phase 1 · Identity and workforce (weeks 2 and 3)
 
 **Goal: sign in, see employees, model the company.**
 
-- Sign-in: JWT and refresh cookie, role guards, two-factor authentication for admins, rate limiting
+- Sign-in: JWT and refresh cookie, role guards, two-factor setup and verification for ADMIN and HR_PAYROLL, rate limiting
+- Admin-only system information endpoint (API version and environment), because the public health check no longer shares them
 - Audit log on every change to important data
-- Employees: create, update, terminate; sites, posts, shift patterns and assignments
-- Dashboard: sign-in page, employee list and detail, site pages (against the mock API first)
+- Employees: create, update, terminate; employment periods for rehired guards; sites, posts, shift patterns and assignments
+- Dashboard: sign-in and two-factor screens, employee list and detail, site pages (the mock API already supports all of them)
+- Dashboard: once the API serves `/employees`, remove the "Phase 1" notice for live mode in `apps/web/src/app/router.tsx`
 - **Exit demo:** create an employee, assign them to a site and shift, and see the change in the audit trail
 
 ## Phase 2 · Attendance on mocks (weeks 4 and 5)

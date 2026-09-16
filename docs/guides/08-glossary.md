@@ -158,6 +158,12 @@ A long-lived token, kept in a secure cookie, used to get new short-lived access 
 **Role-based access control (RBAC)**
 Permissions based on a user's role: ADMIN, HR_PAYROLL, SUPERVISOR or GUARD.
 
+**Row-level security (RLS)**
+A PostgreSQL feature that decides which rows each database user may see. SAMTEC switches it on for every table, so only the API, which owns the tables, can read them.
+
+**Same site**
+Two web addresses under the same domain, such as `app.samtec.example` and `api.samtec.example`. Browsers send a `SameSite=Strict` cookie only between addresses on the same site.
+
 **Schema**
 A description of the shape of data. A database schema describes tables; a Zod schema describes valid input; a contract schema describes API data.
 
@@ -166,6 +172,9 @@ Fictional starter data loaded into a development database with `pnpm db:seed`.
 
 **Service (NestJS)**
 A class that holds business logic and database access. Controllers call services.
+
+**Service worker**
+A script a browser runs in the background for a website. MSW uses one to answer the dashboard's requests with mock data.
 
 **shadcn/ui**
 A collection of well-designed React components that are copied into our code, so we own and can change them.

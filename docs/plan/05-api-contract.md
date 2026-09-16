@@ -28,15 +28,15 @@ CI runs `pnpm contracts:check`, which fails if the YAML is invalid or if someone
 - **Time:** timestamps in UTC (ISO 8601); calendar dates as `YYYY-MM-DD`.
 - **Errors:** Problem Details (RFC 9457) with `type`, `title`, `status`, `detail`, `traceId`, and `errors` for validation. Stack traces never leave the server.
 - **Lists:** cursor pagination with `?cursor=&limit=` and a `nextCursor` in the response. Page numbers are not used.
-- **Sign-in:** `Authorization: Bearer <access token>`. The refresh token lives only in an `HttpOnly` cookie.
-- **Data minimisation:** list responses leave out sensitive fields. For example, `EmployeeListItem` has no Ghana Card number.
+- **Sign-in:** `Authorization: Bearer <access token>`. The refresh token lives only in an `HttpOnly`, `Secure`, `SameSite=Strict` cookie that the browser sends only to `/api/v1/auth`.
+- **Data minimisation:** responses include only what the role needs. `EmployeeListItem` has no Ghana Card number, and a full `Employee` record includes it only for ADMIN, HR_PAYROLL and the guard themselves.
 
 ## Endpoint map
 
 | Area | Endpoints | Status |
 |---|---|---|
 | System | `GET /health` | **Built in Phase 0** |
-| Auth | `POST /auth/login`, `POST /auth/2fa/verify`, `POST /auth/refresh`, `POST /auth/logout`, `GET /auth/me` | In the contract; built in Phase 1 |
+| Auth | `POST /auth/login`, `POST /auth/2fa/verify`, `POST /auth/2fa/setup`, `POST /auth/2fa/enable`, `POST /auth/refresh`, `POST /auth/logout`, `GET /auth/me` | In the contract and the mock API; built in Phase 1 |
 | Employees | `GET /employees`, `POST /employees`, `GET /employees/{id}`, `PATCH /employees/{id}`, `POST /employees/{id}/terminate` | In the contract; built in Phase 1 |
 | Sites | `GET /sites`, `GET /sites/{id}` | In the contract; built in Phase 1 |
 | Rosters | posts, shift patterns, assignments | Added to the contract in Phase 1 |
@@ -49,6 +49,8 @@ CI runs `pnpm contracts:check`, which fails if the YAML is invalid or if someone
 
 ## Security notes for specific endpoints
 
+- **`GET /health`** is public, so it reports only status, time and database state. The API version and environment will come from an admin-only endpoint in Phase 1.
+- **Sign-in endpoints** (Phase 1) follow the two-factor and session rules in [Security and review gates](06-security-and-review-gates.md#security-controls): short-lived one-time tokens, a limit on wrong codes, rotating refresh cookies with reuse detection, and an `Origin` check on refresh and logout.
 - **`POST /ingest/punches`** (Phase 2) authenticates each device with its own secret (an HMAC signature), not a user token. It is rate-limited per device, limits body size, and ignores repeated punches.
 - **Approval endpoints** (Phase 4) enforce that the maker is not the checker inside the service, not only in the dashboard.
 - **Guard accounts** can read only their own attendance and payslips. Tests must prove that guard A cannot read guard B's records (OWASP API Security risk number 1).

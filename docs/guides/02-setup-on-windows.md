@@ -144,7 +144,7 @@ Run these from the repository root.
 | Fix formatting automatically | `pnpm lint:fix` |
 | Check everything like CI | `pnpm check` |
 | Apply new database migrations after pulling | `pnpm db:migrate` |
-| Wipe and refill my local database | `pnpm db:reset` |
+| Wipe and refill my local database | `pnpm db:reset` (it asks you to confirm) |
 | Browse the database in a web page | `pnpm db:studio` |
 
 ## Optional: use Supabase instead of the local database
@@ -152,9 +152,11 @@ Run these from the repository root.
 Useful when both developers want to share one database, and later for the hosted demo.
 
 1. Create a free project at https://supabase.com.
-2. In the project, open **Connect**, copy the PostgreSQL connection string, and replace the password placeholder with your database password.
-3. Paste it into `apps/api/.env` as `DATABASE_URL`.
-4. Run `pnpm db:migrate`.
+2. In the project settings, open **Data API** and switch it **off**. SAMTEC reaches the database only through its own API, and the Data API would be a second way in.
+3. Open **Connect**, copy the PostgreSQL connection string, and replace the password placeholder with your database password.
+4. Paste it into `apps/api/.env` as `DATABASE_URL`.
+5. Create the tables with `pnpm db:deploy`. Never run `pnpm db:migrate` or `pnpm db:reset` against a shared database: they are for your own computer and can delete data.
+6. To load the demo data, run `ALLOW_REMOTE_SEED=yes pnpm db:seed`. The seed refuses any database that is not on your computer unless you say so like this.
 
 Never commit `.env`, and never paste the connection string into chats, issues or pull requests.
 
@@ -168,7 +170,9 @@ Never commit `.env`, and never paste the connection string into chats, issues or
 | `pnpm db:start` fails on port 54329 | The database is already running in another terminal. |
 | `Can't reach database server` | Start the database with `pnpm db:start` in another terminal. |
 | `Invalid environment configuration` | `apps/api/.env` is missing or wrong. Copy it again from `apps/api/.env.example`. |
-| The dashboard says it cannot reach the API | Start the API with `pnpm dev` or `pnpm dev:api`, or use mock data with `pnpm dev:web`. |
+| The dashboard says it cannot reach the API | Start the API with `pnpm dev` or `pnpm dev:api`. If it is running, check that `CORS_ORIGINS` in `apps/api/.env` is `http://localhost:5173`. Or use mock data with `pnpm dev:web`. |
+| The page says **The mock API could not start** | Open http://localhost:5173 in Chrome, Edge or Firefox, not in a private window or a preview browser built into another app. |
+| `pnpm db:migrate` says a migration was modified or is missing | Your local database was built from an older version of the migrations. Run `pnpm db:reset` and confirm. |
 | Installs are very slow | Antivirus scanning slows down `node_modules`. It is only slow the first time. |
 
 Next: [Frontend guide](03-frontend-guide.md) or [Backend guide](04-backend-guide.md).

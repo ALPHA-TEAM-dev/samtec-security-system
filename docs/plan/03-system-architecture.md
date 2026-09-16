@@ -1,6 +1,6 @@
 # 03 · System architecture
 
-SAMTEC is a **modular monolith**: one API application that is deployed as a single unit, with strict module boundaries inside it. The interactive 3D build map shows the same layers; this page is the authoritative text version.
+SAMTEC is a **modular monolith**: one API application that is deployed as a single unit, with strict module boundaries inside it.
 
 ## Layers
 
@@ -56,12 +56,13 @@ What happens when the dashboard calls `GET /api/v1/health`:
 1. **Request ID middleware** gives the request an ID and returns it in the `X-Request-ID` header.
 2. **Helmet** adds secure HTTP headers.
 3. **CORS** checks that the request comes from an allowed website.
-4. **Routing** finds `HealthController.getHealth`.
-5. **Validation** runs Zod schemas declared on the route (none on `/health`).
-6. **Controller** calls `HealthService.check()`.
-7. **Service** asks `PrismaService` whether the database answers.
-8. **Response** is JSON shaped exactly like `HealthResponse` in the contract.
-9. **If anything throws,** `ProblemDetailsFilter` turns it into a Problem Details error that includes the request ID as `traceId`.
+4. **Body parser** reads a JSON body of up to 100 kB (a GET has none). A bigger body is refused with `413`.
+5. **Routing** finds `HealthController.getHealth`.
+6. **Validation** runs Zod schemas declared on the route (none on `/health`).
+7. **Controller** calls `HealthService.check()`.
+8. **Service** asks `PrismaService` whether the database answers. It gives up after 3 seconds, and reuses the answer for 5 seconds.
+9. **Response** is JSON shaped exactly like `HealthResponse` in the contract.
+10. **If anything throws,** `ProblemDetailsFilter` turns it into a Problem Details error that includes the request ID as `traceId`. It logs one line for a client error (4xx), and the error type and stack for a server error (5xx). It never logs request bodies, query strings or error messages, because those can contain personal data.
 
 ## The golden path (the whole business flow)
 
@@ -87,6 +88,17 @@ guard's finger or face
 | Demo | Client presentation and final year defense | The same fictional seed, plus planted ghost workers (Phase 5), hosted online |
 | Pilot | Only if the client signs | Real data, only after the Phase 7 security gate passes |
 
+## Hosting: one site for the dashboard and the API
+
+The refresh token cookie uses `SameSite=Strict`, so a browser only sends it when the dashboard and the API belong to the **same site**. A dashboard on `samtec.vercel.app` calling an API on `samtec.up.railway.app` would not work: those are two different sites, and signing in would silently fail.
+
+For the hosted demo (Phase 8), use one of these, in order of preference:
+
+1. **One domain, two subdomains.** The dashboard on `app.<domain>` and the API on `api.<domain>`. Subdomains of one domain count as the same site. Set `CORS_ORIGINS=https://app.<domain>` on the API.
+2. **A rewrite on the dashboard's host.** Vercel forwards `/api/v1/*` to the API, so the browser only ever talks to one address. Set `VITE_API_BASE_URL=/api/v1`.
+
+Local development already works, because `localhost:5173` and `localhost:3000` count as the same site.
+
 ## Rules that hold everywhere
 
 These are enforced in code and checked in every review.
@@ -96,5 +108,6 @@ These are enforced in code and checked in every review.
 3. People are never hard-deleted; their `status` changes, so history survives.
 4. Every table has `created_at` and `updated_at`. The audit log (Phase 1) is append-only.
 5. IDs are **UUID version 7**: sortable by time and impossible to guess from a URL.
+6. Every table has **row-level security** switched on in the migration that creates it, so only the API can read it. See [Data model](04-data-model.md#row-level-security-on-every-table).
 
 Related: [Data model](04-data-model.md) · [API contract](05-api-contract.md) · [Biometric integration](10-biometric-integration.md)

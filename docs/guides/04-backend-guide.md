@@ -18,11 +18,11 @@ apps/api/
 │   ├── app.setup.ts           security settings shared by main.ts and tests
 │   ├── config/                environment variables, checked at startup
 │   ├── database/              PrismaService, the database client
-│   ├── common/                request IDs and the error format (Problem Details)
+│   ├── common/                request IDs, the error format (Problem Details) and date helpers
 │   ├── health/                GET /api/v1/health, the reference example
 │   ├── modules/               business features, one folder per module
 │   └── generated/prisma/      the generated Prisma client (never edit, never committed)
-├── test/                      end-to-end tests
+├── test/                      end-to-end tests, and create-test-app.ts that starts the app for them
 └── .env.example               copy to .env
 ```
 
@@ -31,7 +31,7 @@ apps/api/
 1. **Module:** a box that groups related code. `HealthModule` holds the health controller and service.
 2. **Controller:** handles HTTP. It defines routes (`@Get()`), reads inputs, sets status codes, and calls a service. Keep controllers thin.
 3. **Service:** holds the business rules and the database access. Most of your code lives here, and most of your tests test it.
-4. **Dependency injection:** a class lists what it needs in its constructor, and Nest supplies it. `HealthService` asks for `PrismaService` and `AppConfig`. Tests can supply fakes instead.
+4. **Dependency injection:** a class lists what it needs in its constructor, and Nest supplies it. `HealthService` asks for `PrismaService`. Tests can supply fakes instead.
 5. **Pipes, filters and middleware:** code that runs around every request. Our validation pipe checks input, our filter formats errors, our middleware adds request IDs and security headers.
 
 ## The life of a request
@@ -39,11 +39,11 @@ apps/api/
 What happens when someone calls `GET /api/v1/health`:
 
 1. `requestIdMiddleware` gives the request an ID and adds the `X-Request-ID` header.
-2. Helmet adds secure headers; CORS checks the calling website.
+2. Helmet adds secure headers; CORS checks the calling website; a JSON body of up to 100 kB is read (a bigger one gets `413`).
 3. Nest finds the route `HealthController.getHealth()`.
 4. The validation pipe checks any Zod schemas on the route (none here).
 5. The controller calls `HealthService.check()`.
-6. The service asks `PrismaService.isReachable()`, which runs `SELECT 1`.
+6. The service asks `PrismaService.isReachable()`, which runs `SELECT 1` and gives up after 3 seconds. The answer is reused for 5 seconds, because anyone can call this endpoint.
 7. The controller returns the report with status 200, or 503 if the database is down.
 8. If anything throws, `ProblemDetailsFilter` sends a Problem Details error with the request ID as `traceId`.
 
@@ -150,6 +150,8 @@ export class SitesService {
 
 The return type `Site` comes from the contract. If you forget a field or use the wrong type, TypeScript stops you.
 
+**Calendar dates.** Timestamps become text with `toISOString()`, as above. A calendar-date column (`@db.Date`, such as an employee's `hireDate`) must use `toIsoDate(employee.hireDate)` from `src/common/dates.ts`, which gives `2026-09-15` as the contract expects.
+
 ### 3. The controller: HTTP only
 
 ```ts
@@ -211,7 +213,7 @@ describe('SitesService', () => {
 });
 ```
 
-Add an end-to-end test in `test/` for the route itself, following `test/health.e2e-spec.ts`.
+Add an end-to-end test in `test/` for the route itself. `createTestApp()` from `test/create-test-app.ts` starts the real app with a fake database. `test/health.e2e-spec.ts` is the simplest example, and `test/http-safety.e2e-spec.ts` shows how to check validation errors.
 
 ### 6. Check and open a pull request
 
@@ -224,19 +226,27 @@ Then follow [Git and pull requests](06-git-and-pull-requests.md).
 ## Changing the database
 
 1. Edit `apps/api/prisma/schema.prisma`.
-2. Create and apply a migration, giving it a short name when asked:
+2. Create and apply a migration, giving it a short name when asked. The same command also regenerates the Prisma client:
 
    ```bash
    pnpm db:migrate
    ```
 
 3. **Read the generated `migration.sql`.** Make sure it does not delete data you need.
-4. Commit `schema.prisma` and the new migration folder together.
+4. **If the migration creates a table,** add row-level security for it at the end of `migration.sql`, then run `pnpm db:reset` to apply the edited file (see [Data model](../plan/04-data-model.md#row-level-security-on-every-table)):
+
+   ```sql
+   ALTER TABLE "new_table" ENABLE ROW LEVEL SECURITY;
+   ```
+
+5. Commit `schema.prisma` and the new migration folder together.
 
 Rules:
 
 - Never edit a migration that is already on `main`. Create a new one instead.
-- `pnpm db:reset` deletes everything in your **local** database, reapplies all migrations and reseeds. It is handy when your local data is a mess. Never point it at a shared database.
+- `pnpm db:migrate` and `pnpm db:reset` are for your **own computer** only. For a shared or hosted database, use `pnpm db:deploy`, which only applies migrations and never deletes anything.
+- `pnpm db:reset` deletes everything in your local database, reapplies all migrations and reseeds. It asks you to confirm first. It is handy when your local data is a mess, or when a migration changed before merging.
+- `pnpm db:seed` refuses a database that is not on your computer, unless you run it with `ALLOW_REMOTE_SEED=yes` on purpose.
 - Money columns are integers (pesewas). Timestamps use `@db.Timestamptz(3)`. People and money records are never deleted; add a status instead.
 
 ## Adding a configuration setting
@@ -251,6 +261,9 @@ Rules:
 - Throw Nest's HTTP exceptions for expected problems: `NotFoundException`, `ConflictException`, `ForbiddenException`, `BadRequestException`.
 - Never catch an error just to hide it. Let unexpected errors reach the filter, which logs them and sends a safe, generic 500 response.
 - Records a user may not see return **404**, not 403, so nobody can discover which IDs exist.
+- A `ConflictException` (409) gets the type `urn:samtec:problem:conflict`, as the contract promises.
+
+**What the logs contain.** The filter writes one warning line for a client error (4xx): method, path, status and `traceId`. For a server error (5xx) it adds the error's type, code and stack. It never logs request bodies, query strings or error messages, because they can contain names or Ghana Card numbers. Follow the same rule in your own log lines: log IDs and the `traceId`, never personal data. A test in `problem-details.filter.spec.ts` checks this.
 
 ## Security checklist for every endpoint
 
@@ -283,5 +296,8 @@ Rules:
 | `Nest can't resolve dependencies of ...` | A provider is missing from a module's `providers`, the module is not imported, or a class was imported with `import type`. |
 | `Module '"../generated/prisma/client.js"' has no exported member` | The Prisma client is out of date. Run `pnpm --filter @samtec/api db:generate`. |
 | `EADDRINUSE: address already in use :::3000` | Another API is already running. Close that terminal, or change `PORT` in `.env`. |
+| `pnpm db:migrate` says a migration was modified or is missing | Your local database was built from an older version of the migrations. Run `pnpm db:reset` and confirm. It rebuilds your local database and reloads the demo data. |
+| `Refusing to seed the database at "..."` | `DATABASE_URL` points at a database that is not on your computer. Seeding a hosted database needs `ALLOW_REMOTE_SEED=yes`. |
+| `Each CORS origin must be a bare address` | `CORS_ORIGINS` has a path or a trailing slash. Use exactly `http://localhost:5173`. |
 
 Related: [System architecture](../plan/03-system-architecture.md) · [Data model](../plan/04-data-model.md) · [Changing the API contract](05-api-contract-workflow.md)

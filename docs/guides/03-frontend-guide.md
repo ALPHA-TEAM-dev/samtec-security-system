@@ -16,9 +16,11 @@ apps/web/
 ├── src/
 │   ├── main.tsx                 starts the app (and the mock API in mock mode)
 │   ├── index.css                Tailwind and the shadcn/ui theme
+│   ├── vite-env.d.ts            the names and types of the VITE_ settings
 │   ├── app/
 │   │   ├── app.tsx              providers: React Query and the router
-│   │   └── router.tsx           every page and its web address
+│   │   ├── router.tsx           every page and its web address
+│   │   └── mock-api-start-error.tsx   shown if mock mode cannot start
 │   ├── pages/                   one file per page, plus its test
 │   ├── components/
 │   │   ├── layout/              the app shell (sidebar, top bar) and navigation items
@@ -26,11 +28,14 @@ apps/web/
 │   ├── lib/
 │   │   ├── api.ts               $api: the typed API client
 │   │   ├── env.ts               dashboard settings
-│   │   ├── format.ts            money, dates and durations for display
+│   │   ├── format.ts            money and dates for display
 │   │   └── problem.ts           turns API errors into messages
-│   ├── mocks/                   the mock API (MSW) and its fictional data
+│   ├── mocks/
+│   │   ├── handlers/            the mock API, one file per area (system, auth, employees, sites)
+│   │   ├── data/                fictional employees, sites and sign-in accounts
+│   │   └── helpers.ts           shared pieces: error responses, pagination, input checks
 │   └── test/                    test setup and render helper
-└── vite.config.ts
+└── vite.config.ts               also keeps the mock API out of production builds
 ```
 
 ## Running it
@@ -42,6 +47,10 @@ apps/web/
 | `pnpm dev:web:live` | Dashboard only, calling an API that is already running |
 
 The top bar always shows **Mock data** or **Live API**, so nobody mistakes pretend data for real data.
+
+Mock mode exists only while developing. A production build (`pnpm build`) contains no mock code at all, and building in mock mode is refused.
+
+Open the dashboard in **Chrome, Edge or Firefox**. The mock API runs as a service worker, which private windows and some built-in preview browsers block. If that happens, the page says **The mock API could not start** and explains what to do.
 
 ## React in five ideas
 
@@ -56,14 +65,22 @@ The top bar always shows **Mock data** or **Live API**, so nobody mistakes prete
 Open `src/pages/system-status-page.tsx`. The important line is:
 
 ```tsx
-const health = $api.useQuery('get', '/health');
+const health = $api.useQuery('get', '/health', {}, { retry: false });
 ```
 
 - `'get'` and `'/health'` must exist in the contract, or TypeScript shows a red error.
 - `health.data` has exactly the contract's `HealthResponse` shape.
 - `health.isPending` is true while the first load is running.
-- `health.error` holds the error body when the request fails.
+- `health.isFetching` is true whenever a request is running, including "Check again".
+- `health.error` holds the error body when the latest request failed.
 - `health.refetch()` loads it again.
+- `{ retry: false }` shows a failed check straight away. Other pages retry once, but only when the API could not be reached or had a server error (see `src/app/app.tsx`).
+
+**A trap worth knowing.** When a new request fails, React Query keeps the **older successful** result in `health.data` and puts the failure in `health.error`. So decide what to show from `isError` first, or the page would show an old success as if it were current:
+
+```tsx
+const latest = health.isError ? health.error : health.data;
+```
 
 Every page that loads data must show **three states besides the data itself:**
 
@@ -83,6 +100,12 @@ The API returns one page and a `nextCursor`, a bookmark for the next page. The e
 - **Previous:** remove the last bookmark and load the page before.
 - **Search or filter changes:** start again from the first page.
 
+While the next page loads, the table keeps showing the current page, dimmed (`isPlaceholderData`), and extra clicks on **Next** are ignored. The buttons stay enabled while loading, so keyboard users never lose their place.
+
+### Pages whose API is not built yet
+
+The Employees page works with the mock API, but the real API only gets `/employees` in Phase 1. In live mode, `src/app/router.tsx` therefore shows `ComingInPhasePage` instead of a confusing error. Do the same for every new page until its endpoints exist in the API, and remove the check when they do.
+
 ## Adding a page, step by step
 
 Example: the **Sites** page (Phase 1). The endpoint `GET /sites` is already in the contract, and the mock API already answers it.
@@ -91,6 +114,8 @@ Example: the **Sites** page (Phase 1). The endpoint `GET /sites` is already in t
 
 ```tsx
 // src/pages/sites-page.tsx
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
@@ -111,7 +136,20 @@ export function SitesPage() {
     return <Skeleton className="h-40 w-full" />;
   }
   if (sites.isError) {
-    return <p role="alert">{describeApiError(sites.error).message}</p>;
+    // A clear message, the trace ID and a way to try again.
+    const { message, traceId } = describeApiError(sites.error);
+    return (
+      <Alert variant="destructive">
+        <AlertTitle>Sites could not be loaded</AlertTitle>
+        <AlertDescription>
+          <p>{message}</p>
+          {traceId && <p className="font-mono text-xs">Trace ID: {traceId}</p>}
+          <Button variant="outline" size="sm" onClick={() => void sites.refetch()}>
+            Try again
+          </Button>
+        </AlertDescription>
+      </Alert>
+    );
   }
   if (sites.data.items.length === 0) {
     return <p className="text-muted-foreground">No sites yet.</p>;
@@ -146,10 +184,13 @@ export function SitesPage() {
 
 ### 2. Give it a web address
 
-In `src/app/router.tsx`, add it to `children`:
+In `src/app/router.tsx`, add it to `children`. Until the real API serves `/sites` (Phase 1), show the notice in live mode, like the Employees page:
 
 ```tsx
-{ path: 'sites', element: <SitesPage /> },
+{
+  path: 'sites',
+  element: env.useMocks ? <SitesPage /> : <ComingInPhasePage title="Sites" phase={1} />,
+},
 ```
 
 ### 3. Switch on its link
@@ -186,15 +227,27 @@ Then follow [Git and pull requests](06-git-and-pull-requests.md).
 
 The mock API lives in `src/mocks/`:
 
-- `handlers.ts` answers requests the way the real API will, including errors.
-- `data/` holds fictional employees and sites.
+- `handlers/` answers requests the way the real API will, including errors. There is one file per area: `system.ts`, `auth.ts`, `employees.ts` and `sites.ts`.
+- `helpers.ts` holds the pieces they share: Problem Details errors, pagination and input checks.
+- `data/` holds fictional employees, sites and sign-in accounts.
 - In mock mode, `main.tsx` starts it inside the browser. In tests, `src/test/setup.ts` starts it inside Node.js.
+
+The mock handlers check their inputs like the contract says the real API will. For example, `limit=500` or a one-letter search answers `400` with a Problem Details body.
+
+**Mock sign-in accounts**, ready for the Phase 1 sign-in screens. Every password is `demo-password`, and every two-factor code is `123456`:
+
+| Email | What happens after the password |
+|---|---|
+| `supervisor@samtec.example` | Signed straight in |
+| `admin@samtec.example` | Asks for a two-factor code (`POST /auth/2fa/verify`) |
+| `hr@samtec.example` | Must set up two-factor authentication first (`POST /auth/2fa/setup`, then `/enable`) |
 
 **Rules:**
 
 - Use contract types for every response body, so TypeScript catches mistakes.
 - When the contract changes, update the handlers in the same pull request.
 - Mock data is always fictional. Never copy real people into it.
+- In mock mode, a request to the API that no handler answers fails on purpose, with an error in the browser console. Add the missing handler.
 
 **Simulating an error in a test:**
 
@@ -234,12 +287,13 @@ Forms will use react-hook-form with Zod schemas. They are added, and logged as a
 
 The components in `src/components/ui/` are copied into our code, so you can read and change them. Use them instead of building buttons, tables or dialogs from scratch.
 
-**Adding a component** (run inside `apps/web`):
+**Adding a component** (from the repository root):
 
 ```bash
-cd apps/web
-pnpm dlx shadcn@latest add dialog
+pnpm --filter @samtec/web exec shadcn add dialog
 ```
+
+This uses the shadcn version installed in the project, instead of downloading whatever version is newest that day.
 
 Then import it: `import { Dialog } from '@/components/ui/dialog';`.
 
@@ -268,6 +322,8 @@ Always use the helpers in `src/lib/format.ts`:
 | Money | `formatCedis(amountPesewas)` → `GH₵ 1,234.56` | `amount / 100`, `toFixed` |
 | A calendar date | `formatDate('2026-09-15')` → `15 Sept 2026` | `new Date(...).toLocaleDateString()` |
 | A timestamp | `formatDateTime(isoTimestamp)` → Ghana time | the viewer's local time zone |
+
+`formatDate` refuses a timestamp such as `2026-09-15T08:30:00Z` with a clear error, because that needs `formatDateTime`. The dashboard tests run in the Honolulu time zone on purpose, so a date shown in the computer's own time zone fails a test.
 
 ## Accessibility checklist
 
@@ -303,8 +359,10 @@ Testing tips:
 | Problem | Fix |
 |---|---|
 | Red TypeScript error on `$api.useQuery('get', '/something')` | The path or parameters are not in the contract. Check `openapi.yaml`, or change the contract first. |
-| The page shows "Could not reach the SAMTEC API" | You are in live mode without the API. Use `pnpm dev:web`, or start the API. |
-| A test fails with "request … has no matching handler" | Add a handler to `src/mocks/handlers.ts`, or use `server.use(...)` in that test. |
+| The page shows "Could not reach the SAMTEC API" | You are in live mode without the API. Use `pnpm dev:web`, or start the API. If the API is running, check that `CORS_ORIGINS` in `apps/api/.env` includes `http://localhost:5173`. |
+| The page says **The mock API could not start** | Open http://localhost:5173 in Chrome, Edge or Firefox, not in a private window or a built-in preview browser. |
+| The Employees page says the real API gets it in Phase 1 | You are in live mode. Use `pnpm dev:web` to work with mock data. |
+| A test fails with "request … has no matching handler" | Add a handler in `src/mocks/handlers/`, or use `server.use(...)` in that test. |
 | Styles look broken | Stop the dev server and start it again. Check `src/index.css` still starts with the Tailwind import. |
 
 Related: [Changing the API contract](05-api-contract-workflow.md) · [System architecture](../plan/03-system-architecture.md)

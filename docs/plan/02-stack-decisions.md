@@ -34,7 +34,8 @@ Versions are the ones installed in Phase 0 (September 2026).
 | Database | **PostgreSQL 17** | Payroll is money. It needs transactions, foreign keys and constraints. |
 | ORM | **Prisma 7.9.1**, pinned to that exact version, with the `pg` driver adapter | A readable schema file, safe migrations and fully typed queries. The decision log explains the exact pin. |
 | Local database | **embedded-postgres** through `pnpm db:start` | A real PostgreSQL server with no Docker and no installer, which matters on student Windows laptops. |
-| Hosted database | **Supabase**, used as plain PostgreSQL | A free tier with backups for the demo. We do not use its login features. |
+| Hosted database | **Supabase**, used as plain PostgreSQL | A free tier with backups for the demo. We do not use its login features, and its Data API is switched off; every table also has row-level security as a safety net. |
+| TypeScript scripts | **tsx** | Runs the seed file and the local database script straight from TypeScript, with no build step. |
 | Security middleware | **Helmet 8**, strict CORS, request IDs | Secure headers and traceable errors from the first day. |
 | Tests | **Vitest 4** and Supertest | The same test runner as the dashboard. The official NestJS 12 template also uses it. |
 | Sign-in (Phase 1) | JWT access token (15 minutes), rotating refresh cookie, argon2id, TOTP two-factor | Standard and defensible, with no vendor lock-in. |
@@ -48,6 +49,8 @@ Versions are the ones installed in Phase 0 (September 2026).
 | UI library | **React 19** | The most widely used UI library, with the most tutorials and help available. |
 | Routing | **React Router 8** in data mode | Standard page routing with error pages built in. |
 | Styling | **Tailwind CSS 4** and **shadcn/ui** on Radix | Professional, accessible components that live in our code, so we can change them. |
+| Class names | **cn** | Joins class names and settles clashing Tailwind classes (`cn('px-3', isActive && 'font-medium')`). The shadcn/ui components expect it. |
+| Font | **Geist**, bundled with `@fontsource-variable/geist` | A clear interface font served from our own build, so the dashboard makes no request to an outside font service. |
 | Data fetching | **TanStack Query 5** with **openapi-fetch** and **openapi-react-query** | One typed hook per endpoint (`$api.useQuery`) and no hand-written fetch code. |
 | Mock API | **MSW 2** (Mock Service Worker) | The dashboard runs and is tested against pretend endpoints before the backend exists. |
 | Tests | **Vitest 4** and **Testing Library** | Tests use each page the way a person would. |
@@ -72,7 +75,9 @@ Details are in [Biometric integration](10-biometric-integration.md).
 | Supply chain | pnpm refuses package versions less than a day old, refuses versions whose publishing trust dropped (for example, provenance suddenly missing), requires approval for install scripts (`allowBuilds`) and blocks packages from git or tarball sources |
 | Commit messages | Conventional Commits (`feat:`, `fix:`, `docs:` and so on) |
 | Reviews | The four-lens checklist in every pull request, plus `/lens-review` in Claude Code |
-| Demo hosting (Phase 8) | API on Railway or Render, dashboard on Vercel, database on Supabase |
+| Code owners | `.github/CODEOWNERS` asks both developers to review changes, including dependencies, CI and migrations |
+| Action updates | Dependabot proposes new versions of the pinned GitHub Actions every week |
+| Demo hosting (Phase 8) | API on Railway or Render, dashboard on Vercel, database on Supabase, with the dashboard and API on the same site ([System architecture](03-system-architecture.md#hosting-one-site-for-the-dashboard-and-the-api)) |
 
 ## Consciously rejected
 
@@ -91,3 +96,5 @@ Details are in [Biometric integration](10-biometric-integration.md).
 | 2026-09-15 | Pinned Prisma to exactly 7.9.1 instead of 7.10.0 | pnpm's trust policy blocked `prisma@7.10.0`. Every 7.9.x release came from Prisma's verified GitHub pipeline with signed provenance, but the 7.10.0 CLI package was published with a plain access token and has no provenance. That is most likely a publishing mistake, yet it is exactly what a hijacked maintainer account looks like. Upgrade once a Prisma release is published with provenance again. |
 | 2026-09-15 | Raised NestJS to 12.0.2, overrode mysql2 inside the Prisma CLI to 3.24.4, and accepted one advisory in writing | The first dependency audit found 7 advisories. NestJS 12.0.2 brings the patched multer 2.3.0, which fixes four of them. The mysql2 override fixes two more, in a MySQL driver we never use. The deepmerge-ts advisory only affects the Prisma CLI merging our own config file, and its fix is a major version that Prisma pins against, so it is accepted in `pnpm-workspace.yaml` until Prisma updates. |
 | 2026-09-15 | Added a one-off trust policy exception for `semver@6.3.1` | A 2023 security release published without provenance, which pnpm reports as a trust downgrade (a known false positive). The shadcn CLI needs it. |
+| 2026-09-16 | The public health check reports only status, time and database state. The refresh cookie became `SameSite=Strict`, so the dashboard and API must share one site. Two-factor setup joined the sign-in contract. Employee records leave out the Ghana Card number for roles that do not need it. | Four-lens review of the Phase 0 pull request. Version and environment details help attackers plan; a strict same-site cookie shuts out cross-site request forgery; data minimisation is required by Act 843. |
+| 2026-09-16 | Regenerated the first migration before merging: `site_assignments` gained `company_id` and `updated_at`, `employees` gained `biometric_enrolled_at`, and every table got row-level security | Nothing had been deployed yet, so one clean first migration is easier to read and defend than a fix-up migration. Row-level security protects the data even if Supabase's Data API is switched on by mistake. |

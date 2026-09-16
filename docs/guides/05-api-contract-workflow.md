@@ -33,14 +33,14 @@ And the shape it refers to, further down under `components/schemas`:
 ```yaml
 HealthResponse:
   type: object
-  required: [status, version, environment, uptimeSeconds, time, checks]
+  required: [status, time, checks]   # these fields must always be present
   properties:
     status:
       type: string
       enum: [ok, degraded]       # only these two values are allowed
-    uptimeSeconds:
-      type: integer
-      minimum: 0
+    time:
+      type: string
+      format: date-time          # a timestamp such as 2026-09-15T08:30:00Z
 ```
 
 The main building blocks:
