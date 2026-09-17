@@ -1,18 +1,18 @@
 import { UnauthorizedException } from '@nestjs/common';
 import { beforeAll, describe, expect, it } from 'vitest';
+import { FakeThrottle } from '../../../test/fakes/fake-throttle.js';
 import { FakeIdentityDb } from '../../../test/fakes/identity-db.js';
 import { RateLimitException } from '../../common/rate-limit.exception.js';
 import { AppConfig } from '../../config/app-config.js';
 import { AuditService } from './audit.service.js';
 import { AuthService } from './auth.service.js';
 import { hashPassword, TEST_ONLY_SCRYPT_PARAMS } from './password.js';
-import { SignInThrottleService } from './sign-in-throttle.service.js';
 import { TokensService } from './tokens.service.js';
 import { totpCode, totpStep } from './totp.js';
 
 /**
- * The sign-in flows against a fake in-memory database. The same flows also
- * run against real PostgreSQL in test/db.e2e-spec.ts.
+ * The sign-in flows against a fake in-memory database and throttle. The same
+ * flows also run against real PostgreSQL in test/db.e2e-spec.ts.
  */
 
 const config = new AppConfig({
@@ -31,14 +31,14 @@ beforeAll(async () => {
 function makeAuth() {
   const db = new FakeIdentityDb();
   const prisma = db.asPrisma();
-  const tokens = new TokensService(config);
+  const throttle = new FakeThrottle();
   const auth = new AuthService(
     prisma,
-    tokens,
-    new SignInThrottleService(prisma),
+    new TokensService(config),
+    throttle.asService(),
     new AuditService(prisma),
   );
-  return { db, auth, tokens };
+  return { db, auth, throttle };
 }
 
 describe('login', () => {
@@ -93,7 +93,23 @@ describe('login', () => {
     expect((error as UnauthorizedException).message).toBe('Email or password is incorrect.');
   });
 
-  it('locks an email after five wrong passwords, whether or not it has an account', async () => {
+  it('locks an email after five wrong passwords, and audits the lockout for real accounts', async () => {
+    const { db, auth } = makeAuth();
+    const user = db.addUser({ email: 'ama@samtec.example', passwordHash, role: 'SUPERVISOR' });
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await auth.login('ama@samtec.example', 'guess').catch(() => undefined);
+    }
+    const locked = await auth.login('ama@samtec.example', 'guess').catch((e: unknown) => e);
+
+    expect(locked).toBeInstanceOf(RateLimitException);
+    expect(db.auditEntries).toContainEqual({
+      action: 'auth.lockout_triggered',
+      entityId: user.id,
+    });
+  });
+
+  it('locks an email that has no account too, revealing nothing', async () => {
     const { auth } = makeAuth();
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -117,13 +133,13 @@ describe('login', () => {
 
 describe('two-factor setup and verification', () => {
   async function setUpTwoFactor(role: 'ADMIN' | 'HR_PAYROLL' = 'HR_PAYROLL') {
-    const { db, auth, tokens } = makeAuth();
+    const { db, auth, throttle } = makeAuth();
     const user = db.addUser({ email: 'hr@samtec.example', passwordHash, role });
     const login = await auth.login('hr@samtec.example', 'demo-password');
     if (login.kind !== 'setup') throw new Error('Expected a setup outcome');
     const setupToken = login.response.setupToken;
     const setup = await auth.startTwoFactorSetup(setupToken);
-    return { db, auth, tokens, user, setupToken, secret: setup.manualEntryKey };
+    return { db, auth, throttle, user, setupToken, secret: setup.manualEntryKey };
   }
 
   it('turns two-factor on only after a correct code, then requires it at sign-in', async () => {
@@ -143,6 +159,24 @@ describe('two-factor setup and verification', () => {
 
     const nextLogin = await auth.login('hr@samtec.example', 'demo-password');
     expect(nextLogin.kind).toBe('challenge');
+  });
+
+  it('running setup again replaces the secret: codes from the first QR stop working', async () => {
+    const { auth, setupToken, secret: firstSecret } = await setUpTwoFactor();
+
+    const secondSetup = await auth.startTwoFactorSetup(setupToken);
+    expect(secondSetup.manualEntryKey).not.toBe(firstSecret);
+
+    const stale = await auth
+      .enableTwoFactor(setupToken, totpCode(firstSecret, totpStep()))
+      .catch((e: unknown) => e);
+    expect(stale).toBeInstanceOf(UnauthorizedException);
+
+    const fresh = await auth.enableTwoFactor(
+      setupToken,
+      totpCode(secondSetup.manualEntryKey, totpStep()),
+    );
+    expect(fresh.session.status).toBe('AUTHENTICATED');
   });
 
   it('refuses a code that was already accepted (replay protection)', async () => {
@@ -185,23 +219,51 @@ describe('two-factor setup and verification', () => {
     expect((done as UnauthorizedException).message).toContain('expired');
   });
 
-  it('refuses a challenge token where a setup token is expected', async () => {
-    const { auth, setupToken } = await setUpTwoFactor();
+  it('caps code guessing per ACCOUNT: fresh sign-ins never grant fresh attempts', async () => {
+    // The attack this stops: someone who KNOWS the password signs in over and
+    // over, using each new challenge for 5 more code guesses. The per-account
+    // totp throttle counts across challenges, so guessing still locks out.
+    const { db, auth, user, setupToken, secret } = await setUpTwoFactor();
+    await auth.enableTwoFactor(setupToken, totpCode(secret, totpStep()));
 
-    // Use the setup token as if it were a verify token: wrong purpose.
-    const error = await auth.verifyTwoFactor(setupToken, '123456').catch((e: unknown) => e);
+    // recordSuccess at enable reset the counter; now guess wrongly across
+    // several fresh challenges: 3 on the first, 2 on the second.
+    const first = await auth.login('hr@samtec.example', 'demo-password');
+    if (first.kind !== 'challenge') throw new Error('Expected a challenge');
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await auth.verifyTwoFactor(first.response.challengeToken, '000000').catch(() => undefined);
+    }
+    const second = await auth.login('hr@samtec.example', 'demo-password');
+    if (second.kind !== 'challenge') throw new Error('Expected a challenge');
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await auth.verifyTwoFactor(second.response.challengeToken, '000000').catch(() => undefined);
+    }
 
-    expect(error).toBeInstanceOf(UnauthorizedException);
+    // Five wrong codes in total: the account's totp throttle is now locked,
+    // so even a correct password cannot start another guessing round…
+    const blockedLogin = await auth
+      .login('hr@samtec.example', 'demo-password')
+      .catch((e: unknown) => e);
+    expect(blockedLogin).toBeInstanceOf(RateLimitException);
+    // …and the still-open challenge is blocked too.
+    const blockedVerify = await auth
+      .verifyTwoFactor(second.response.challengeToken, totpCode(secret, totpStep() + 1))
+      .catch((e: unknown) => e);
+    expect(blockedVerify).toBeInstanceOf(RateLimitException);
+    expect(db.auditEntries).toContainEqual({
+      action: 'auth.lockout_triggered',
+      entityId: user.id,
+    });
   });
 });
 
 describe('refresh token rotation', () => {
   async function signedInSupervisor() {
-    const { db, auth, tokens } = makeAuth();
+    const { db, auth } = makeAuth();
     db.addUser({ email: 'ama@samtec.example', passwordHash, role: 'SUPERVISOR' });
     const outcome = await auth.login('ama@samtec.example', 'demo-password');
     if (outcome.kind !== 'session') throw new Error('Expected a session');
-    return { db, auth, tokens, refreshToken: outcome.refreshToken };
+    return { db, auth, refreshToken: outcome.refreshToken };
   }
 
   it('rotates the refresh token on every use', async () => {
@@ -227,6 +289,26 @@ describe('refresh token rotation', () => {
     const after = await auth.refresh(rotated.refreshToken).catch((e: unknown) => e);
     expect(after).toBeInstanceOf(UnauthorizedException);
     expect(db.auditEntries.map((entry) => entry.action)).toContain('auth.refresh_reuse_detected');
+  });
+
+  it('lets at most one of two RACING refreshes win, and kills every session after', async () => {
+    // Two requests replay the same token at the same moment (a stolen token
+    // used in parallel with the real one). The atomic "claim" means at most
+    // one can mint a session, and the loser triggers revoke-everything.
+    const { db, auth, refreshToken } = await signedInSupervisor();
+
+    const results = await Promise.allSettled([
+      auth.refresh(refreshToken),
+      auth.refresh(refreshToken),
+    ]);
+
+    const wins = results.filter((result) => result.status === 'fulfilled');
+    expect(wins.length).toBeLessThanOrEqual(1);
+    // The loser always trips the alarm: reuse is detected and audited.
+    expect(db.auditEntries.map((entry) => entry.action)).toContain('auth.refresh_reuse_detected');
+    // And the replayed token itself is dead for good.
+    const replayAgain = await auth.refresh(refreshToken).catch((e: unknown) => e);
+    expect(replayAgain).toBeInstanceOf(UnauthorizedException);
   });
 
   it('signs out by revoking the session, and signing out twice is fine', async () => {

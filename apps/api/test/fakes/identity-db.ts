@@ -1,26 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import type { PrismaService } from '../../src/database/prisma.service.js';
-import type {
-  AuthChallenge,
-  LoginThrottle,
-  User,
-  UserSession,
-} from '../../src/generated/prisma/client.js';
+import type { AuthChallenge, User, UserSession } from '../../src/generated/prisma/client.js';
 
 /**
  * A pretend database for the identity unit tests: plain objects in arrays,
- * with just the Prisma methods the identity services call. Because services
- * receive the database through their constructors, tests can hand them this
- * instead of a real PostgreSQL connection, and stay fast.
+ * with just the Prisma methods `AuthService` calls. Because services receive
+ * the database through their constructors, tests can hand them this instead
+ * of a real PostgreSQL connection, and stay fast.
  *
  * The e2e tests in `test/db.e2e-spec.ts` run the same flows against a real
- * database, so this fake cannot drift silently.
+ * database, so this fake cannot drift silently. (`SignInThrottleService`
+ * writes atomic SQL, so it is only tested against the real database; the
+ * unit tests pair `AuthService` with `FakeThrottle` below instead.)
  */
 export class FakeIdentityDb {
   users: User[] = [];
   sessions: UserSession[] = [];
   challenges: AuthChallenge[] = [];
-  throttles: LoginThrottle[] = [];
   auditEntries: Array<{ action: string; entityId: string | null }> = [];
 
   /** Adds a user with sensible defaults; override what a test cares about. */
@@ -87,18 +83,27 @@ export class FakeIdentityDb {
           Object.assign(session, data);
           return session;
         },
+        // Matches on whichever of id / userId / revokedAt the caller sent,
+        // and reports how many rows changed — like the real updateMany.
         updateMany: async ({
           where,
           data,
         }: {
-          where: { userId: string; revokedAt: null };
+          where: { id?: string; userId?: string; revokedAt?: null };
           data: Partial<UserSession>;
         }) => {
+          let count = 0;
           for (const session of this.sessions) {
-            if (session.userId === where.userId && session.revokedAt === null) {
+            const matches =
+              (where.id === undefined || session.id === where.id) &&
+              (where.userId === undefined || session.userId === where.userId) &&
+              (!('revokedAt' in where) || session.revokedAt === where.revokedAt);
+            if (matches) {
               Object.assign(session, data);
+              count += 1;
             }
           }
+          return { count };
         },
       },
       authChallenge: {
@@ -133,11 +138,19 @@ export class FakeIdentityDb {
           data,
         }: {
           where: { id: string };
-          data: Partial<AuthChallenge>;
+          data: Omit<Partial<AuthChallenge>, 'failedAttempts'> & {
+            failedAttempts?: number | { increment: number };
+          };
         }) => {
           const challenge = this.challenges.find((candidate) => candidate.id === where.id);
           if (!challenge) throw new Error('No such challenge');
-          Object.assign(challenge, data);
+          const { failedAttempts, ...rest } = data;
+          Object.assign(challenge, rest);
+          if (typeof failedAttempts === 'number') {
+            challenge.failedAttempts = failedAttempts;
+          } else if (failedAttempts !== undefined) {
+            challenge.failedAttempts += failedAttempts.increment;
+          }
           return challenge;
         },
         delete: async ({ where }: { where: { id: string } }) => {
@@ -148,33 +161,6 @@ export class FakeIdentityDb {
             (candidate) =>
               !(candidate.userId === where.userId && candidate.purpose === where.purpose),
           );
-        },
-      },
-      loginThrottle: {
-        findUnique: async ({ where }: { where: { emailHash: string } }) =>
-          this.throttles.find((row) => row.emailHash === where.emailHash) ?? null,
-        upsert: async ({
-          where,
-          create,
-          update,
-        }: {
-          where: { emailHash: string };
-          create: Omit<LoginThrottle, 'updatedAt'>;
-          update: Partial<LoginThrottle>;
-        }) => {
-          const existing = this.throttles.find((row) => row.emailHash === where.emailHash);
-          if (existing) {
-            Object.assign(existing, update, { updatedAt: new Date() });
-            return existing;
-          }
-          const row: LoginThrottle = { updatedAt: new Date(), ...create };
-          this.throttles.push(row);
-          return row;
-        },
-        delete: async ({ where }: { where: { emailHash: string } }) => {
-          const exists = this.throttles.some((row) => row.emailHash === where.emailHash);
-          if (!exists) throw new Error('No such row');
-          this.throttles = this.throttles.filter((row) => row.emailHash !== where.emailHash);
         },
       },
       auditLog: {

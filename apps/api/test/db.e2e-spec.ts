@@ -401,6 +401,58 @@ describe.skipIf(!databaseUrl)('Phase 1 on a real database (e2e)', () => {
     });
   });
 
+  describe('sign-in throttle (atomic counting)', () => {
+    function wrongLogin(email: string) {
+      return request(app.getHttpServer())
+        .post('/api/v1/auth/login')
+        .send({ email, password: 'wrong-guess' });
+    }
+
+    it('counts PARALLEL wrong passwords — a burst cannot slip past the lockout', async () => {
+      // The attack: fire many guesses at once, hoping each one reads the
+      // counter before any writes it. The atomic SQL counts them all.
+      const burst = await Promise.all(
+        Array.from({ length: 8 }, () => wrongLogin('burst@dbtest.example')),
+      );
+      // At least the first responses are 401; once the count passes 5 the rest are 429.
+      expect(burst.every((r) => r.status === 401 || r.status === 429)).toBe(true);
+
+      const after = await wrongLogin('burst@dbtest.example');
+      expect(after.status).toBe(429);
+      expect(Number(after.headers['retry-after'])).toBeGreaterThan(0);
+    });
+
+    it('stores only keyed hashes — never the emails people typed', async () => {
+      await wrongLogin('privacy-probe@dbtest.example');
+
+      const prisma = openFixtureDb(databaseUrl as string);
+      const rows = await prisma.signInThrottle.findMany();
+      await prisma.$disconnect();
+
+      expect(rows.length).toBeGreaterThan(0);
+      expect(JSON.stringify(rows)).not.toContain('dbtest.example');
+      for (const row of rows) {
+        expect(row.keyHash).toMatch(/^[0-9a-f]{64}$/);
+      }
+    });
+
+    it('forgets failures once the 15-minute window has passed', async () => {
+      // Four failures, then move the window back in time by hand.
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        await wrongLogin('window@dbtest.example').expect(401);
+      }
+      const prisma = openFixtureDb(databaseUrl as string);
+      await prisma.signInThrottle.updateMany({
+        data: { windowStartsAt: new Date(Date.now() - 16 * 60_000) },
+      });
+      await prisma.$disconnect();
+
+      // The 5th failure lands in a fresh window: counted as the 1st, no lock.
+      await wrongLogin('window@dbtest.example').expect(401);
+      await wrongLogin('window@dbtest.example').expect(401);
+    });
+  });
+
   describe('system info', () => {
     it('is for administrators only', async () => {
       const asAdmin = await request(app.getHttpServer())

@@ -43,7 +43,7 @@ export async function resetFixture(prisma: PrismaClient): Promise<void> {
   await prisma.siteAssignment.deleteMany({ where: { companyId: TEST_COMPANY_ID } });
   await prisma.employee.deleteMany({ where: { companyId: TEST_COMPANY_ID } });
   await prisma.site.deleteMany({ where: { companyId: TEST_COMPANY_ID } });
-  await prisma.loginThrottle.deleteMany({});
+  await prisma.signInThrottle.deleteMany({});
 
   await prisma.company.upsert({
     where: { id: TEST_COMPANY_ID },

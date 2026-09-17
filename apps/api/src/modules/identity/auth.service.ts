@@ -42,6 +42,13 @@ export interface RotatedSession {
 /**
  * All the sign-in flows, exactly as the contract describes them. Read the
  * contract's `/auth/*` descriptions first; this file is those promises as code.
+ *
+ * Guessing is throttled twice, on purpose:
+ * - wrong **passwords** are counted per email (`password` throttle), and
+ * - wrong **two-factor codes** are counted per account (`totp` throttle).
+ * The second one matters: signing in again issues a fresh challenge, but
+ * never fresh code attempts — so even someone who knows the password cannot
+ * grind through the million possible 6-digit codes.
  */
 @Injectable()
 export class AuthService {
@@ -54,7 +61,7 @@ export class AuthService {
 
   async login(rawEmail: string, password: string): Promise<LoginOutcome> {
     const email = rawEmail.trim().toLowerCase();
-    await this.throttle.assertNotLocked(email);
+    await this.throttle.assertNotLocked('password', email);
 
     const user = await this.prisma.user.findFirst({ where: { email } });
     // When the email has no account, still check the password against a
@@ -62,12 +69,18 @@ export class AuthService {
     // cannot reveal which emails have accounts.
     const passwordOk = await verifyPassword(password, user?.passwordHash ?? NO_SUCH_USER_HASH);
     if (!user || !passwordOk || !user.isActive) {
-      await this.throttle.recordFailure(email);
+      const lockedNow = await this.throttle.recordFailure('password', email);
+      if (lockedNow && user) {
+        await this.recordLockout(user, 'password');
+      }
       throw new UnauthorizedException(WRONG_CREDENTIALS);
     }
-    await this.throttle.recordSuccess(email);
+    await this.throttle.recordSuccess('password', email);
 
     if (user.twoFactorEnabledAt) {
+      // A locked-out authenticator answers 429 here already, instead of
+      // issuing a challenge that could only fail.
+      await this.throttle.assertNotLocked('totp', user.id);
       const challengeToken = await this.issueChallenge(user, 'VERIFY_CODE', CHALLENGE_MINUTES);
       return {
         kind: 'challenge',
@@ -100,6 +113,7 @@ export class AuthService {
     code: string,
   ): Promise<{ session: AuthenticatedSession; refreshToken: string }> {
     const { challenge, user } = await this.loadChallenge(challengeToken, 'VERIFY_CODE');
+    await this.throttle.assertNotLocked('totp', user.id);
     const secret = user.twoFactorSecretEncrypted
       ? this.tokens.decryptSecret(user.twoFactorSecretEncrypted)
       : null;
@@ -107,7 +121,13 @@ export class AuthService {
       throw new UnauthorizedException(CHALLENGE_GONE);
     }
 
-    const matchedStep = await this.checkCode(challenge, secret, code, user.twoFactorLastUsedStep);
+    const matchedStep = await this.checkCode(
+      challenge,
+      user,
+      secret,
+      code,
+      user.twoFactorLastUsedStep,
+    );
     await this.prisma.authChallenge.delete({ where: { id: challenge.id } });
     await this.prisma.user.update({
       where: { id: user.id },
@@ -135,6 +155,7 @@ export class AuthService {
     code: string,
   ): Promise<{ session: AuthenticatedSession; refreshToken: string }> {
     const { challenge, user } = await this.loadChallenge(setupToken, 'SET_UP');
+    await this.throttle.assertNotLocked('totp', user.id);
     if (!challenge.pendingSecretEncrypted) {
       throw new BadRequestException('Call POST /auth/2fa/setup first to get your QR code.');
     }
@@ -143,7 +164,7 @@ export class AuthService {
       throw new UnauthorizedException(CHALLENGE_GONE);
     }
 
-    const matchedStep = await this.checkCode(challenge, secret, code, null);
+    const matchedStep = await this.checkCode(challenge, user, secret, code, null);
     await this.prisma.authChallenge.delete({ where: { id: challenge.id } });
     const enabledUser = await this.prisma.user.update({
       where: { id: user.id },
@@ -181,28 +202,28 @@ export class AuthService {
       throw new UnauthorizedException('Sign in to continue.');
     }
     if (session.revokedAt) {
-      await this.prisma.userSession.updateMany({
-        where: { userId: session.userId, revokedAt: null },
-        data: { revokedAt: new Date() },
-      });
-      await this.audit.record({
-        companyId: session.user.companyId,
-        actorUserId: session.userId,
-        action: 'auth.refresh_reuse_detected',
-        entityType: 'user',
-        entityId: session.userId,
-        detail: { revokedAllSessions: true },
-      });
-      throw new UnauthorizedException('Sign in to continue.');
+      await this.handleRefreshReuse(session.userId, session.user.companyId);
     }
     if (!session.user.isActive) {
       throw new UnauthorizedException('Sign in to continue.');
     }
 
+    // "Claim" the token atomically: only the request that flips revokedAt
+    // from null wins. Two requests racing with the same token would otherwise
+    // both pass the check above and both mint sessions — exactly the replay
+    // this rotation scheme exists to catch.
+    const claimed = await this.prisma.userSession.updateMany({
+      where: { id: session.id, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    if (claimed.count === 0) {
+      await this.handleRefreshReuse(session.userId, session.user.companyId);
+    }
+
     const next = await this.createSessionRow(session.userId);
     await this.prisma.userSession.update({
       where: { id: session.id },
-      data: { revokedAt: new Date(), replacedById: next.sessionId },
+      data: { replacedById: next.sessionId },
     });
     return {
       accessToken: await this.tokens.signAccessToken(this.asSignedIn(session.user)),
@@ -246,6 +267,23 @@ export class AuthService {
   }
 
   // ---------------------------------------------------------------------------
+
+  /** A rotated token came back: sign this user out everywhere and record it. */
+  private async handleRefreshReuse(userId: string, companyId: string): Promise<never> {
+    await this.prisma.userSession.updateMany({
+      where: { userId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    await this.audit.record({
+      companyId,
+      actorUserId: userId,
+      action: 'auth.refresh_reuse_detected',
+      entityType: 'user',
+      entityId: userId,
+      detail: { revokedAllSessions: true },
+    });
+    throw new UnauthorizedException('Sign in to continue.');
+  }
 
   private async establishSession(
     user: User,
@@ -324,32 +362,54 @@ export class AuthService {
   }
 
   /**
-   * Checks a 6-digit code. A wrong code counts against the challenge (5
-   * cancel it); a code at or before the last accepted step is a replay and is
-   * refused. Returns the time step the code matched.
+   * Checks a 6-digit code. A wrong code counts against both the challenge (5
+   * cancel it) and the account's `totp` throttle (5 in 15 minutes lock it) —
+   * the second one is what stops someone with the password from grinding
+   * codes across fresh challenges. A code at or before the last accepted
+   * step is a replay and is refused. Returns the step the code matched.
    */
   private async checkCode(
     challenge: AuthChallenge,
+    user: User,
     secret: string,
     code: string,
     lastUsedStep: bigint | null,
   ): Promise<number> {
     const matchedStep = verifyTotpCode(secret, code);
     if (matchedStep !== null && (lastUsedStep === null || BigInt(matchedStep) > lastUsedStep)) {
+      await this.throttle.recordSuccess('totp', user.id);
       return matchedStep;
     }
-    const failedAttempts = challenge.failedAttempts + 1;
-    await this.prisma.authChallenge.update({
+
+    // `increment` makes the database do the +1, so parallel wrong codes are
+    // all counted instead of overwriting each other.
+    const updated = await this.prisma.authChallenge.update({
       where: { id: challenge.id },
-      data: { failedAttempts },
+      data: { failedAttempts: { increment: 1 } },
     });
-    if (failedAttempts >= MAX_CODE_ATTEMPTS) {
+    const lockedNow = await this.throttle.recordFailure('totp', user.id);
+    if (lockedNow) {
+      await this.recordLockout(user, 'totp');
+    }
+    if (updated.failedAttempts >= MAX_CODE_ATTEMPTS) {
       throw new UnauthorizedException(CHALLENGE_GONE);
     }
     if (matchedStep !== null) {
       throw new UnauthorizedException('That code was already used. Wait for the next one.');
     }
     throw new UnauthorizedException('The code is incorrect.');
+  }
+
+  /** A lockout is worth remembering: it may be the start of an attack. */
+  private async recordLockout(user: User, kind: 'password' | 'totp'): Promise<void> {
+    await this.audit.record({
+      companyId: user.companyId,
+      actorUserId: null,
+      action: 'auth.lockout_triggered',
+      entityType: 'user',
+      entityId: user.id,
+      detail: { kind },
+    });
   }
 
   private asSignedIn(user: User) {

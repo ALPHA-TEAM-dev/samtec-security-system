@@ -51,14 +51,15 @@ CREATE TABLE "auth_challenges" (
 );
 
 -- CreateTable
-CREATE TABLE "login_throttles" (
-    "email_hash" TEXT NOT NULL,
+CREATE TABLE "sign_in_throttles" (
+    "key_hash" TEXT NOT NULL,
     "failed_count" INTEGER NOT NULL DEFAULT 0,
     "window_starts_at" TIMESTAMPTZ(3) NOT NULL,
     "locked_until" TIMESTAMPTZ(3),
+    "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMPTZ(3) NOT NULL,
 
-    CONSTRAINT "login_throttles_pkey" PRIMARY KEY ("email_hash")
+    CONSTRAINT "sign_in_throttles_pkey" PRIMARY KEY ("key_hash")
 );
 
 -- CreateTable
@@ -122,7 +123,7 @@ ALTER TABLE "audit_logs" ADD CONSTRAINT "audit_logs_company_id_fkey" FOREIGN KEY
 ALTER TABLE "users" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "user_sessions" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "auth_challenges" ENABLE ROW LEVEL SECURITY;
-ALTER TABLE "login_throttles" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "sign_in_throttles" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "audit_logs" ENABLE ROW LEVEL SECURITY;
 
 -- -----------------------------------------------------------------------------

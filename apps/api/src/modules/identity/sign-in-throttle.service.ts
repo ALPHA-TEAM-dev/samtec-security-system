@@ -1,35 +1,55 @@
-import { createHash } from 'node:crypto';
+import { createHmac } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { RateLimitException } from '../../common/rate-limit.exception.js';
+import { AppConfig } from '../../config/app-config.js';
 import { PrismaService } from '../../database/prisma.service.js';
+import { deriveKey } from './secret-box.js';
 
 /** Failures are counted within a rolling window this long. */
 const WINDOW_MINUTES = 15;
-/** This many failures in the window lock the email out… */
+/** This many failures in the window lock the key out… */
 const MAX_FAILURES = 5;
 /** …for this long. */
 const LOCK_MINUTES = 15;
 
-const MINUTE_MILLISECONDS = 60_000;
+/**
+ * What is being throttled:
+ * - `password`: wrong passwords, counted per email — whether or not the email
+ *   has an account, so the lockout itself reveals nothing.
+ * - `totp`: wrong two-factor codes, counted per account. This is what stops
+ *   someone who *knows* the password from guessing the 6-digit code: signing
+ *   in again gets fresh challenges, but never fresh code attempts.
+ */
+export type ThrottleKind = 'password' | 'totp';
 
 /**
- * Slows password guessing down. Five wrong passwords for one email inside 15
- * minutes lock that email for 15 minutes, and further tries answer 429 with a
- * `Retry-After` header.
+ * Slows guessing down: five failures for one key inside 15 minutes lock it
+ * for 15 minutes, and further tries answer 429 with a `Retry-After` header.
  *
- * The count is per **email**, and it runs whether or not an account exists,
- * so the lockout itself never reveals which emails have accounts. Emails are
- * stored only as hashes: this table must not become a list of addresses
- * people have typed.
+ * The counting is one atomic SQL statement, so many attempts fired in
+ * parallel are all counted — a read-then-write version could lose counts in
+ * that race and let a scripted attacker through. (Raw SQL is rare in this
+ * project and needs both developers' review; this atomicity is why it is
+ * used here.)
+ *
+ * Keys are stored only as HMACs keyed from AUTH_SECRET: even with the table
+ * in hand, nobody can turn it back into the emails people typed.
  */
 @Injectable()
 export class SignInThrottleService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly hmacKey: Buffer;
 
-  /** Throws 429 when this email is locked out. Call before checking a password. */
-  async assertNotLocked(email: string): Promise<void> {
-    const row = await this.prisma.loginThrottle.findUnique({
-      where: { emailHash: hashEmail(email) },
+  constructor(
+    private readonly prisma: PrismaService,
+    config: AppConfig,
+  ) {
+    this.hmacKey = deriveKey(config.authSecret, 'sign-in-throttle');
+  }
+
+  /** Throws 429 when this key is locked out. Call before checking a password or code. */
+  async assertNotLocked(kind: ThrottleKind, value: string): Promise<void> {
+    const row = await this.prisma.signInThrottle.findUnique({
+      where: { keyHash: this.hashKey(kind, value) },
     });
     if (!row?.lockedUntil) {
       return;
@@ -43,38 +63,51 @@ export class SignInThrottleService {
     }
   }
 
-  /** Counts one wrong password. Returns true when this failure caused a lockout. */
-  async recordFailure(email: string, now: Date = new Date()): Promise<boolean> {
-    const emailHash = hashEmail(email);
-    const existing = await this.prisma.loginThrottle.findUnique({ where: { emailHash } });
-
-    const windowExpired =
-      !existing ||
-      now.getTime() - existing.windowStartsAt.getTime() > WINDOW_MINUTES * MINUTE_MILLISECONDS;
-    const failedCount = windowExpired ? 1 : existing.failedCount + 1;
-    const lockedUntil =
-      failedCount >= MAX_FAILURES
-        ? new Date(now.getTime() + LOCK_MINUTES * MINUTE_MILLISECONDS)
-        : null;
-
-    await this.prisma.loginThrottle.upsert({
-      where: { emailHash },
-      create: { emailHash, failedCount, windowStartsAt: now, lockedUntil },
-      update: windowExpired
-        ? { failedCount, windowStartsAt: now, lockedUntil }
-        : { failedCount, lockedUntil },
-    });
-    return lockedUntil !== null;
+  /** Counts one failure. Returns true when this failure caused a lockout. */
+  async recordFailure(kind: ThrottleKind, value: string): Promise<boolean> {
+    const keyHash = this.hashKey(kind, value);
+    // One statement that inserts or updates, resets an expired window, and
+    // sets the lock — atomically, using the database's own clock. `EXCLUDED`
+    // is PostgreSQL's name for the row we tried to insert.
+    const rows = await this.prisma.$queryRaw<Array<{ locked_until: Date | null }>>`
+      INSERT INTO sign_in_throttles (key_hash, failed_count, window_starts_at, locked_until, created_at, updated_at)
+      VALUES (${keyHash}, 1, now(), NULL, now(), now())
+      ON CONFLICT (key_hash) DO UPDATE SET
+        failed_count = CASE
+          WHEN sign_in_throttles.window_starts_at < now() - ${WINDOW_MINUTES} * interval '1 minute'
+            THEN 1
+          ELSE sign_in_throttles.failed_count + 1
+        END,
+        window_starts_at = CASE
+          WHEN sign_in_throttles.window_starts_at < now() - ${WINDOW_MINUTES} * interval '1 minute'
+            THEN now()
+          ELSE sign_in_throttles.window_starts_at
+        END,
+        locked_until = CASE
+          WHEN (CASE
+            WHEN sign_in_throttles.window_starts_at < now() - ${WINDOW_MINUTES} * interval '1 minute'
+              THEN 1
+            ELSE sign_in_throttles.failed_count + 1
+          END) >= ${MAX_FAILURES}
+            THEN now() + ${LOCK_MINUTES} * interval '1 minute'
+          ELSE NULL
+        END,
+        updated_at = now()
+      RETURNING locked_until
+    `;
+    return rows[0]?.locked_until != null;
   }
 
-  /** A correct sign-in wipes the email's slate clean. */
-  async recordSuccess(email: string): Promise<void> {
-    await this.prisma.loginThrottle
-      .delete({ where: { emailHash: hashEmail(email) } })
-      .catch(() => undefined); // Nothing recorded for this email; fine.
+  /** A correct password or code wipes that key's slate clean. */
+  async recordSuccess(kind: ThrottleKind, value: string): Promise<void> {
+    await this.prisma.signInThrottle
+      .delete({ where: { keyHash: this.hashKey(kind, value) } })
+      .catch(() => undefined); // Nothing recorded for this key; fine.
   }
-}
 
-function hashEmail(email: string): string {
-  return createHash('sha256').update(email.trim().toLowerCase()).digest('hex');
+  private hashKey(kind: ThrottleKind, value: string): string {
+    return createHmac('sha256', this.hmacKey)
+      .update(`${kind}:${value.trim().toLowerCase()}`)
+      .digest('hex');
+  }
 }

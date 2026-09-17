@@ -19,7 +19,13 @@ export function readCookie(request: Request, name: string): string | undefined {
       continue;
     }
     if (part.slice(0, separator).trim() === name) {
-      return decodeURIComponent(part.slice(separator + 1).trim());
+      const value = part.slice(separator + 1).trim();
+      try {
+        return decodeURIComponent(value);
+      } catch {
+        // A malformed value (bad percent-encoding) is "no cookie", not a crash.
+        return undefined;
+      }
     }
   }
   return undefined;
